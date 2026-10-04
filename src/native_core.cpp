@@ -24,6 +24,7 @@
 #  endif
 #  include <windows.h>
 #elif defined(__APPLE__)
+#  include <sys/proc.h>
 #  include <sys/sysctl.h>
 #  include <unistd.h>
 #endif

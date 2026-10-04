@@ -52,8 +52,10 @@ goto wait_ollama
 echo [*] Ollama gateway online on port 11434.
 
 REM ---------- 2b) Confirm it answers on the LAN IP, not just localhost ----
+REM Prefer physical adapters; skip VPN/tunnel interfaces (Surfshark, TAP...)
 set "LAN_IP="
-for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress"') do set "LAN_IP=%%I"
+for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue ^| Where-Object { $_.InterfaceAlias -notmatch 'VPN|WireGuard|TAP|Tunnel|Surfshark|NordVPN|OpenVPN' } ^| Select-Object -First 1).IPAddress"') do set "LAN_IP=%%I"
+if not defined LAN_IP for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue ^| Select-Object -First 1).IPAddress"') do set "LAN_IP=%%I"
 if defined LAN_IP (
     powershell -NoProfile -Command "try { [void](Invoke-WebRequest -Uri 'http://%LAN_IP%:11434/api/tags' -TimeoutSec 3 -UseBasicParsing); exit 0 } catch { exit 1 }" >nul 2>nul
     if errorlevel 1 (
@@ -101,7 +103,7 @@ if defined LAN_IP (
     echo    OLLAMA_BASE_URL      = http://%LAN_IP%:11434
     echo    REMOTE_HOST_BASE_URL = http://%LAN_IP%:8080
 ) else (
-    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue).IPAddress"') do (
+    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue ^| Where-Object { $_.InterfaceAlias -notmatch 'VPN|WireGuard|TAP|Tunnel|Surfshark|NordVPN|OpenVPN' }).IPAddress"') do (
         echo    OLLAMA_BASE_URL      = http://%%I:11434
         echo    REMOTE_HOST_BASE_URL = http://%%I:8080
     )

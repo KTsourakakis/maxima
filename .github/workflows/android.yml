@@ -1,0 +1,48 @@
+name: Android Build
+
+on:
+    push:
+        branches: [main]
+        paths-ignore: ['ios/**', 'macos/**', '.github/workflows/ios.yml']
+    workflow_dispatch:
+        inputs:
+            ollama_base_url:
+                description: 'LAN URL of the Ollama/Qwen host'
+                required: false
+                default: 'http://192.168.1.27:11434'
+            remote_host_base_url:
+                description: 'LAN URL of the chan_dongle host tunnel'
+                required: false
+                default: 'http://192.168.1.27:8080'
+            remote_host_token:
+                description: 'Shared secret for the host tunnel'
+                required: false
+                default: 'maxima-local'
+
+jobs:
+    android:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: subosito/flutter-action@v2
+              with:
+                  channel: stable
+                  cache: true
+            - uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: '17'
+            - name: Flutter pub get
+              run: flutter pub get
+            - name: Build APK (debug)
+              run: >
+                  flutter build apk --debug
+                  --dart-define=OLLAMA_BASE_URL=${{ github.event.inputs.ollama_base_url || 'http://192.168.1.27:11434' }}
+                  --dart-define=REMOTE_HOST_BASE_URL=${{ github.event.inputs.remote_host_base_url || 'http://192.168.1.27:8080' }}
+                  --dart-define=REMOTE_HOST_TOKEN=${{ github.event.inputs.remote_host_token || 'maxima-local' }}
+            - name: Upload APK
+              uses: actions/upload-artifact@v4
+              with:
+                  name: maxima-debug-apk
+                  path: build/app/outputs/flutter-apk/app-debug.apk
+                  retention-days: 14

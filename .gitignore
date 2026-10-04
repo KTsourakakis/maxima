@@ -1,0 +1,33 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.maxima/
+.toolchain/
+android/local.properties
+build/
+
+# Native + desktop build outputs (produced by tools/build_*.sh|.ps1)
+.build/
+native/
+third_party/
+
+# CocoaPods
+ios/Pods/
+ios/.symlinks/
+ios/Podfile.lock
+
+# Flutter desktop ephemeral (generated per-build)
+**/ephemeral/
+
+# Native build intermediates inside the Android module
+android/**/.cxx/
+
+# Generated plugin registrant (Android)
+android/**/GeneratedPluginRegistrant.java
+
+# IDE / OS noise
+.idea/
+.vscode/
+*.iml
+.DS_Store

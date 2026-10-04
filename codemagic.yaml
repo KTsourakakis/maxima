@@ -1,0 +1,20 @@
+# Codemagic iOS validation — alternative to GitHub Actions.
+# Connect this repository at https://codemagic.io (free tier exists for
+# Flutter) and the `ios-build` workflow runs on a Mac with Xcode.
+workflows:
+  ios-build:
+    name: iOS Build
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Flutter pub get
+        script: flutter pub get
+      - name: CocoaPods install
+        script: cd ios && pod install --repo-update
+      - name: Build iOS (no codesign)
+        script: flutter build ios --no-codesign
+    artifacts:
+      - build/ios/**/*

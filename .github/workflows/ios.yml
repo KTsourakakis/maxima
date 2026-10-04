@@ -1,0 +1,46 @@
+# iOS validation on a cloud macOS runner (Xcode + CocoaPods included).
+#
+# Requires: this repository pushed to GitHub with Actions enabled.
+# Trigger: every push to main, or manually via workflow_dispatch.
+#
+# The job reproduces locally what cannot run on Windows:
+#   pod install          -> compiles the native_core pod + ZIPFoundation
+#   flutter build ios    -> full --no-codesign validation pass
+name: iOS Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter environment
+        run: flutter --version && flutter pub get
+
+      - name: CocoaPods install
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --no-codesign
+
+      - name: Archive build products
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-output
+          path: |
+            build/ios/
+            ios/.symlinks
+          retention-days: 14

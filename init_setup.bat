@@ -1,80 +1,116 @@
 @echo off
 setlocal EnableExtensions
-title Maxima Master Key Core - init_setup
+title Maxima - Local AI Gateway Host
 
 REM =====================================================================
-REM  Double-click wrapper for init_setup.sh on Windows.
-REM  Finds (or installs) Git Bash, points the script at the portable
-REM  toolchain Flutter when present, then runs the bootstrap pipeline.
+REM  Runtime launcher only - NO installers, NO downloads, NO admin.
+REM  Assumes Ollama is already installed and the model already pulled.
+REM  Starts: (1) Ollama AI gateway on the LAN
+REM          (2) chan_dongle host tunnel (if Python is present)
 REM =====================================================================
 
 cd /d "%~dp0"
+echo [*] Maxima local host services - runtime only
 
-if not exist "init_setup.sh" (
-    echo [FAIL] init_setup.sh not found next to this .bat file.
+REM ---------- 1) Locate Ollama (user-space install paths) -----------------
+set "OLLAMA_EXE="
+where ollama >nul 2>nul && set "OLLAMA_EXE=ollama"
+if not defined OLLAMA_EXE if exist "%LocalAppData%\Programs\Ollama\ollama.exe" set "OLLAMA_EXE=%LocalAppData%\Programs\Ollama\ollama.exe"
+if not defined OLLAMA_EXE if exist "%ProgramFiles%\Ollama\ollama.exe"        set "OLLAMA_EXE=%ProgramFiles%\Ollama\ollama.exe"
+
+if not defined OLLAMA_EXE (
+    echo [FAIL] Ollama was not found. Install it once from https://ollama.com/download
     pause
     exit /b 1
 )
+echo [*] Ollama: %OLLAMA_EXE%
 
-set "BASH_EXE="
+REM ---------- 2) Start the AI gateway on the LAN --------------------------
+REM OLLAMA_HOST must be 0.0.0.0 so the phone can reach it over Wi-Fi.
+set "OLLAMA_HOST=0.0.0.0"
 
-REM --- 1) Existing Git for Windows installs -------------------------------
-if exist "%ProgramFiles%\Git\bin\bash.exe"        set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
-if not defined BASH_EXE if exist "%LocalAppData%\Programs\Git\bin\bash.exe" set "BASH_EXE=%LocalAppData%\Programs\Git\bin\bash.exe"
-if not defined BASH_EXE if exist "%ProgramFiles(x86)%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles(x86)%\Git\bin\bash.exe"
+"%OLLAMA_EXE%" list >nul 2>nul
+if not errorlevel 1 goto ollama_ready
 
-REM --- 2) Derive bash.exe from a git.exe already on PATH -------------------
-if not defined BASH_EXE (
-    for /f "delims=" %%G in ('where git.exe 2^>nul') do (
-        if not defined BASH_EXE if exist "%%~dpG..\bin\bash.exe" set "BASH_EXE=%%~dpG..\bin\bash.exe"
-    )
+echo [*] Starting Ollama service...
+start "Maxima Ollama" /min "%OLLAMA_EXE%" serve
+
+set /a tries=0
+:wait_ollama
+"%OLLAMA_EXE%" list >nul 2>nul
+if not errorlevel 1 goto ollama_ready
+set /a tries+=1
+if %tries% geq 30 (
+    echo [FAIL] Ollama service did not come up within 30 seconds.
+    pause
+    exit /b 1
 )
+timeout /t 1 /nobreak >nul
+goto wait_ollama
 
-REM --- 3) Install Git for Windows via winget (provides Git Bash) -----------
-if not defined BASH_EXE (
-    echo [*] Git Bash not found. Installing Git for Windows via winget...
-    where winget >nul 2>nul
+:ollama_ready
+echo [*] Ollama gateway online on port 11434.
+
+REM ---------- 2b) Confirm it answers on the LAN IP, not just localhost ----
+set "LAN_IP="
+for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress"') do set "LAN_IP=%%I"
+if defined LAN_IP (
+    powershell -NoProfile -Command "try { [void](Invoke-WebRequest -Uri 'http://%LAN_IP%:11434/api/tags' -TimeoutSec 3 -UseBasicParsing); exit 0 } catch { exit 1 }" >nul 2>nul
     if errorlevel 1 (
-        echo [FAIL] winget is unavailable. Install Git for Windows manually:
-        echo        https://git-scm.com/download/win
+        echo [!] Ollama answers on localhost but NOT on %LAN_IP%:11434.
+        echo     A tray copy bound to 127.0.0.1 is probably running.
+        echo     Quit the Ollama tray icon, then double-click this file again.
         pause
         exit /b 1
     )
-    winget install --id Git.Git --exact --silent --accept-source-agreements --accept-package-agreements
-    if exist "%ProgramFiles%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
-    if not defined BASH_EXE if exist "%LocalAppData%\Programs\Git\bin\bash.exe" set "BASH_EXE=%LocalAppData%\Programs\Git\bin\bash.exe"
+    echo [*] Ollama is reachable from the phone at http://%LAN_IP%:11434
 )
 
-if not defined BASH_EXE (
-    echo [FAIL] Could not locate or install Git Bash.
-    pause
-    exit /b 1
-)
-
-echo [*] Using Bash: %BASH_EXE%
-
-REM --- 4) Prefer the portable toolchain Flutter if it exists ---------------
-if exist "C:\dev\toolchain\flutter-sdk\flutter\bin\flutter" (
-    set "FLUTTER_HOME=/c/dev/toolchain/flutter-sdk/flutter"
-    echo [*] FLUTTER_HOME=%FLUTTER_HOME%
-)
-
-REM --- 5) Convert this directory to a POSIX path for bash ------------------
-set "WIN_DIR=%~dp0"
-set "POSIX_DIR=%WIN_DIR:\=/%"
-set "DRIVE=%POSIX_DIR:~0,1%"
-set "POSIX_DIR=/%DRIVE%%POSIX_DIR:~2%"
-set "POSIX_DIR=%POSIX_DIR:~0,-1%"
-
-echo [*] Running init_setup.sh ...
-"%BASH_EXE%" -c "cd '%POSIX_DIR%' && ./init_setup.sh"
-set "EXITCODE=%ERRORLEVEL%"
-
-echo.
-if "%EXITCODE%"=="0" (
-    echo [OK] init_setup.sh completed successfully.
+REM ---------- 3) Verify the model is available ----------------------------
+"%OLLAMA_EXE%" list 2>nul | findstr /i "qwen" >nul
+if errorlevel 1 (
+    echo [!] No qwen model found in 'ollama list'. Pull one manually:
+    echo     %OLLAMA_EXE% pull qwen2.5:1.5b
 ) else (
-    echo [FAIL] init_setup.sh exited with code %EXITCODE%.
+    echo [*] Qwen model is present.
 )
+
+REM ---------- 4) Mount the local host tunnel (chan_dongle bridge) ----------
+set "MAXIMA_HOST_BIND=0.0.0.0"
+if "%MAXIMA_HOST_TOKEN%"=="" set "MAXIMA_HOST_TOKEN=maxima-local"
+
+where python >nul 2>nul
+if errorlevel 1 (
+    echo [!] Python not on PATH - host tunnel skipped (Ollama still running).
+    goto show_summary
+)
+if not exist "tools\chan_dongle_server.py" (
+    echo [!] tools\chan_dongle_server.py missing - host tunnel skipped.
+    goto show_summary
+)
+echo [*] Starting host tunnel on port 8080 ...
+start "Maxima Host Tunnel" /min python "%~dp0tools\chan_dongle_server.py"
+
+:show_summary
+echo.
+echo ============================================================
+echo  Local services are up. Use these addresses when rebuilding
+echo  the app or configuring endpoints:
+echo.
+if defined LAN_IP (
+    echo    OLLAMA_BASE_URL      = http://%LAN_IP%:11434
+    echo    REMOTE_HOST_BASE_URL = http://%LAN_IP%:8080
+) else (
+    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue).IPAddress"') do (
+        echo    OLLAMA_BASE_URL      = http://%%I:11434
+        echo    REMOTE_HOST_BASE_URL = http://%%I:8080
+    )
+)
+echo    REMOTE_HOST_TOKEN    = %MAXIMA_HOST_TOKEN%
+echo.
+echo  First run may pop a Windows Firewall prompt - click
+echo  "Allow access" on Private networks. No admin needed.
+echo ============================================================
+echo.
 pause
-exit /b %EXITCODE%
+exit /b 0

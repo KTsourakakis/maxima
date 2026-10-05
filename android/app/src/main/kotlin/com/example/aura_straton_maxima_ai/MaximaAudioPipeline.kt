@@ -94,6 +94,15 @@ class MaximaAudioPipeline(private val context: Context) {
     @Volatile
     private var lastPartialEmittedAt = 0L
 
+    // Rolling capture of the last ~4s of PCM16 so every final
+    // transcript event can carry the audio that produced it —
+    // Dart uses it for the voice-identification protocol.
+    private val voiceRing = ByteArray(SAMPLE_RATE * 2 * 4)
+    @Volatile
+    private var ringPos = 0
+    @Volatile
+    private var ringFilled = false
+
     val isRunning: Boolean get() = running
 
     fun start() {
@@ -264,6 +273,7 @@ class MaximaAudioPipeline(private val context: Context) {
 
                 feedVoiceCapture(pcm)
                 feedRecording(pcm)
+                pushRing(pcm)
                 recognizer?.let { feedRecognizer(it, pcm) }
             }
         } finally {
@@ -275,6 +285,30 @@ class MaximaAudioPipeline(private val context: Context) {
             recognizer?.close()
             model?.close()
         }
+    }
+
+    private fun pushRing(pcm: ShortArray) {
+        val size = voiceRing.size
+        for (sample in pcm) {
+            voiceRing[ringPos] = (sample.toInt() and 0xff).toByte()
+            voiceRing[(ringPos + 1) % size] =
+                (sample.toInt() shr 8 and 0xff).toByte()
+            ringPos = (ringPos + 2) % size
+            if (ringPos == 0) ringFilled = true
+        }
+    }
+
+    /** The most recent captured audio, oldest sample first. */
+    private fun ringSnapshot(): ByteArray {
+        if (!ringFilled && ringPos == 0) return ByteArray(0)
+        if (!ringFilled) {
+            return voiceRing.copyOf(ringPos)
+        }
+        val out = ByteArray(voiceRing.size)
+        val tail = voiceRing.size - ringPos
+        System.arraycopy(voiceRing, ringPos, out, 0, tail)
+        System.arraycopy(voiceRing, 0, out, tail, ringPos)
+        return out
     }
 
     private fun feedVoiceCapture(pcm: ShortArray) {
@@ -329,6 +363,7 @@ class MaximaAudioPipeline(private val context: Context) {
                     "phrase" to key,
                     "transcript" to transcript,
                     "final" to complete,
+                    "audio" to if (complete) ringSnapshot() else ByteArray(0),
                 )
             )
         }
@@ -343,6 +378,7 @@ class MaximaAudioPipeline(private val context: Context) {
                         "phrase" to "",
                         "transcript" to transcript,
                         "final" to true,
+                        "audio" to ringSnapshot(),
                     )
                 )
             } else {

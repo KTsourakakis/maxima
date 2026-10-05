@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io'
     show
         Directory,
@@ -6,6 +7,7 @@ import 'dart:io'
         NetworkInterface,
         Platform,
         Socket;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,6 +24,7 @@ import 'services/remote_ai_gateway.dart';
 import 'services/remote_host_gateway.dart';
 import 'services/secure_recorder.dart';
 import 'services/sip_client.dart';
+import 'services/voice_print.dart';
 import 'services/wake_on_lan.dart';
 import 'services/wake_word_controller.dart';
 
@@ -116,16 +119,33 @@ class _InstallationGatewayState extends State<InstallationGateway>
     /// commands (red/green/gold/blue) pin a fixed accent instead.
     bool _colorCycle = true;
     bool _greeted = false;
+
+    /// Voice-identification protocol state. The enrolled owner print
+    /// persists in secure storage; while [_enrollingVoice] is true,
+    /// final transcripts collect samples instead of becoming queries.
+    VoicePrint? _voicePrint;
+    bool _enrollingVoice = false;
+    final List<VoicePrint> _enrollSamples = [];
+    String _voiceStatus = 'voice ID: not enrolled';
+
+    /// Short-lived agent activity line ("thinking...", "voice
+    /// rejected") so agent behavior is visible, not silent.
+    String _agentStatus = '';
+    Timer? _agentStatusTimer;
+
     String _speechModelStatus = 'speech model: not checked';
     String _speechLang = 'en';
     String? _installedModelLang;
 
-    /// Small Vosk acoustic models (~40-50 MB), one per language. The
+    /// Small Vosk acoustic models (~40-60 MB), one per language — the
+    /// complete set of lightweight offline models Vosk publishes. The
     /// recognizer holds a single model at a time; switching language
     /// downloads that model and restarts the engine.
     static const Map<String, String> _speechModels = {
         'en': 'https://alphacephei.com/vosk/models/'
             'vosk-model-small-en-us-0.15.zip',
+        'en-IN': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-en-in-0.4.zip',
         'el': 'https://alphacephei.com/vosk/models/'
             'vosk-model-small-el-gr-0.7.zip',
         'es': 'https://alphacephei.com/vosk/models/'
@@ -134,13 +154,83 @@ class _InstallationGatewayState extends State<InstallationGateway>
             'vosk-model-small-fr-0.22.zip',
         'de': 'https://alphacephei.com/vosk/models/'
             'vosk-model-small-de-0.15.zip',
+        'it': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-it-0.22.zip',
+        'pt': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-pt-0.3.zip',
+        'nl': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-nl-0.22.zip',
+        'ca': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-ca-0.4.zip',
+        'pl': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-pl-0.22.zip',
+        'uk': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-uk-0.22.zip',
+        'ru': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-ru-0.22.zip',
+        'tr': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-tr-0.3.zip',
+        'ar': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-ar-0.22.zip',
+        'fa': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-fa-0.5.zip',
+        'hi': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-hi-0.22.zip',
+        'gu': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-gu-0.42.zip',
+        'ja': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-ja-0.22.zip',
+        'ko': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-ko-0.22.zip',
+        'zh': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-cn-0.22.zip',
+        'vi': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-vn-0.4.zip',
+        'uz': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-uz-0.22.zip',
+        'kk': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-kz-0.15.zip',
+        'cs': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-cs-0.4-rhasspy.zip',
+        'sv': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-sv-rhasspy-0.15.zip',
+        'eo': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-eo-0.42.zip',
+        'br': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-br-0.7.zip',
+        'tl': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-tl-ph-0.6.zip',
     };
     static const Map<String, String> _speechLangNames = {
         'en': 'English',
+        'en-IN': 'English (India)',
         'el': 'Greek',
         'es': 'Spanish',
         'fr': 'French',
         'de': 'German',
+        'it': 'Italian',
+        'pt': 'Portuguese',
+        'nl': 'Dutch',
+        'ca': 'Catalan',
+        'pl': 'Polish',
+        'uk': 'Ukrainian',
+        'ru': 'Russian',
+        'tr': 'Turkish',
+        'ar': 'Arabic',
+        'fa': 'Persian',
+        'hi': 'Hindi',
+        'gu': 'Gujarati',
+        'ja': 'Japanese',
+        'ko': 'Korean',
+        'zh': 'Chinese (Mandarin)',
+        'vi': 'Vietnamese',
+        'uz': 'Uzbek',
+        'kk': 'Kazakh',
+        'cs': 'Czech',
+        'sv': 'Swedish',
+        'eo': 'Esperanto',
+        'br': 'Breton',
+        'tl': 'Tagalog',
     };
     double _batteryThreshold = 15;
     String _name = 'MAXIMA';
@@ -228,6 +318,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
         _wolMacInput.dispose();
         _hostInput.dispose();
         _liveTranscriptTimer?.cancel();
+        _agentStatusTimer?.cancel();
         _pulseController.dispose();
         _hueController.dispose();
         _aiGateway?.close();
@@ -247,6 +338,14 @@ class _InstallationGatewayState extends State<InstallationGateway>
             _installedModelLang = await _settingsStore.read(
                 key: 'maxima_speech_lang_installed',
             );
+            final printJson =
+                await _settingsStore.read(key: 'maxima_voiceprint');
+            if (printJson != null) {
+                _voicePrint = VoicePrint.fromJson(
+                    jsonDecode(printJson) as Map<String, dynamic>,
+                );
+                _voiceStatus = 'voice ID: enrolled';
+            }
             if (savedLang != null && _speechModels.containsKey(savedLang)) {
                 _speechLang = savedLang;
             }
@@ -581,16 +680,31 @@ class _InstallationGatewayState extends State<InstallationGateway>
             unawaited(_ensureSpeechModelThenStart());
         } else if (status == 'listening' && !_greeted) {
             // The voice-recognition protocol announces itself once per
-            // app run so the user knows — audibly — that the mic is
-            // live and the recognizer is ready.
+            // app run. First run starts voice-ID enrollment; after
+            // that it just confirms the mic is live.
             _greeted = true;
-            unawaited(
-                _speak(
-                    'Maxima online. I am listening. '
-                    'Say my name, then your question.',
-                    lang: _speechLang,
-                ),
-            );
+            if (_voicePrint == null) {
+                _enrollingVoice = true;
+                _enrollSamples.clear();
+                setState(() => _voiceStatus =
+                    'voice ID: enrolling — speak naturally (0/3)');
+                unawaited(
+                    _speak(
+                        'Maxima online. Voice identification protocol. '
+                        'Please say Maxima, then a short sentence, '
+                        'three times.',
+                        lang: _speechLang,
+                    ),
+                );
+            } else {
+                unawaited(
+                    _speak(
+                        'Maxima online. I am listening. '
+                        'Say my name, then your question.',
+                        lang: _speechLang,
+                    ),
+                );
+            }
         }
     }
 
@@ -601,10 +715,104 @@ class _InstallationGatewayState extends State<InstallationGateway>
     /// Trigger rules: always respond when the transcript contains the
     /// wake name ("maxima"); otherwise only in agent mode (toggle in
     /// the MICROPHONE panel).
-    Future<void> _agentTranscript(String transcript) async {
+    /// Updates the short-lived agent status line under the core and
+    /// in the MIC panel, then auto-clears.
+    void _setAgentStatus(String status) {
+        if (!mounted) return;
+        _agentStatusTimer?.cancel();
+        setState(() => _agentStatus = status);
+        _agentStatusTimer = Timer(
+            const Duration(seconds: 6),
+            () {
+                if (mounted) setState(() => _agentStatus = '');
+            },
+        );
+    }
+
+    /// Collects one voiceprint sample during enrollment. Three
+    /// utterances become the stored owner print.
+    Future<void> _enrollVoiceSample(Uint8List audio) async {
+        final features = extractVoiceFeatures(audio);
+        if (features == null) return;
+        _enrollSamples.add(VoicePrint(Float64List.fromList(features)));
+        final n = _enrollSamples.length;
+        if (n < 3) {
+            setState(() => _voiceStatus =
+                'voice ID: enrolling — speak naturally ($n/3)');
+            return;
+        }
+        _voicePrint = VoicePrint.average(_enrollSamples);
+        _enrollSamples.clear();
+        _enrollingVoice = false;
+        setState(() => _voiceStatus = 'voice ID: enrolled');
+        unawaited(
+            _settingsStore.write(
+                key: 'maxima_voiceprint',
+                value: jsonEncode(_voicePrint!.toJson()),
+            ),
+        );
+        await _speak(
+            'Voice enrolled. I will only answer to you.',
+            lang: _speechLang,
+        );
+    }
+
+    /// Compares the utterance audio against the enrolled owner print.
+    /// Utterances without usable audio are allowed through (engine
+    /// builds without the ring buffer still work).
+    bool _verifyVoice(Uint8List? audio) {
+        final enrolled = _voicePrint;
+        if (enrolled == null || audio == null || audio.length < 16000) {
+            return true;
+        }
+        final features = extractVoiceFeatures(audio);
+        if (features == null) return true;
+        final score = enrolled.similarity(
+            VoicePrint(Float64List.fromList(features)),
+        );
+        if (score >= voiceVerifyThreshold) return true;
+        _setAgentStatus(
+            'voice rejected (${score.toStringAsFixed(2)})',
+        );
+        return false;
+    }
+
+    /// Restarts the voice-ID enrollment (e.g. a different owner).
+    void _reenrollVoice() {
+        setState(() {
+            _voicePrint = null;
+            _enrollingVoice = true;
+            _enrollSamples.clear();
+            _voiceStatus =
+                'voice ID: enrolling — speak naturally (0/3)';
+        });
+        unawaited(_settingsStore.delete(key: 'maxima_voiceprint'));
+        unawaited(
+            _speak(
+                'Voice identification reset. Please say Maxima, '
+                'then a short sentence, three times.',
+                lang: _speechLang,
+            ),
+        );
+    }
+
+    Future<void> _agentTranscript(
+        String transcript,
+        Uint8List? audio,
+    ) async {
         if (mounted) setState(() => _liveTranscript = '');
         if (_agentBusy) return;
         if (DateTime.now().isBefore(_agentCooldownUntil)) return;
+
+        // Voice-ID enrollment consumes utterances instead of
+        // answering them.
+        if (_enrollingVoice) {
+            if (audio != null && audio.length > 16000) {
+                unawaited(_enrollVoiceSample(audio));
+            }
+            return;
+        }
+        if (!_verifyVoice(audio)) return;
 
         final lower = transcript.toLowerCase();
         // Tolerant wake-name match: small Vosk models split or bend
@@ -638,10 +846,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
 
         final gateway = _aiGateway;
         if (gateway == null) {
+            _setAgentStatus('no gateway — connect the host in REMOTE AI');
             _showMessage('Set the host IP in REMOTE AI to talk to Maxima.');
             return;
         }
 
+        _setAgentStatus('thinking…');
         _agentBusy = true;
         try {
             final answer = await gateway.generate(
@@ -652,8 +862,10 @@ class _InstallationGatewayState extends State<InstallationGateway>
             );
             if (!mounted || answer.isEmpty) return;
             setState(() => _translationOutput = 'You: $transcript\n\n$answer');
+            _setAgentStatus('answered');
             await _speak(answer, lang: _speechLang);
         } catch (error) {
+            _setAgentStatus('gateway error — check REMOTE AI status');
             _showMessage('Agent query failed: $error');
         } finally {
             _agentBusy = false;
@@ -1093,7 +1305,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                         _liveTranscript
                                                                 .isNotEmpty
                                                             ? _liveTranscript
-                                                            : 'LISTENING',
+                                                            : _agentStatus
+                                                                    .isNotEmpty
+                                                                ? _agentStatus
+                                                                : _enrollingVoice
+                                                                    ? 'ENROLL YOUR VOICE'
+                                                                    : 'LISTENING',
                                                         textAlign:
                                                             TextAlign.center,
                                                         maxLines: 2,
@@ -1102,8 +1319,11 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                                 .ellipsis,
                                                         style: TextStyle(
                                                             color:
-                                                                _liveTranscript
-                                                                        .isNotEmpty
+                                                                (_liveTranscript
+                                                                            .isNotEmpty ||
+                                                                        _agentStatus
+                                                                            .isNotEmpty ||
+                                                                        _enrollingVoice)
                                                                     ? accent
                                                                     : Colors
                                                                         .white38,
@@ -1113,8 +1333,11 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                                         .isNotEmpty
                                                                     ? FontStyle
                                                                         .normal
-                                                                    : FontStyle
-                                                                        .italic,
+                                                                    : _enrollingVoice
+                                                                        ? FontStyle
+                                                                            .normal
+                                                                        : FontStyle
+                                                                            .italic,
                                                             letterSpacing: 1,
                                                         ),
                                                     ),
@@ -1486,6 +1709,49 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                             ),
                                                         ),
                                                     ),
+                                                if (_agentStatus.isNotEmpty)
+                                                    Align(
+                                                        alignment: Alignment
+                                                            .centerLeft,
+                                                        child: Text(
+                                                            'agent: '
+                                                            '$_agentStatus',
+                                                            style:
+                                                                const TextStyle(
+                                                                color: Colors
+                                                                    .amberAccent,
+                                                                fontSize: 11,
+                                                            ),
+                                                        ),
+                                                    ),
+                                                Row(
+                                                    children: [
+                                                        Expanded(
+                                                            child: Text(
+                                                                _voiceStatus,
+                                                                style:
+                                                                    const TextStyle(
+                                                                    color: Colors
+                                                                        .white38,
+                                                                    fontSize:
+                                                                        10,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        TextButton(
+                                                            onPressed:
+                                                                _reenrollVoice,
+                                                            child: const Text(
+                                                                'Re-enroll',
+                                                                style:
+                                                                    TextStyle(
+                                                                    fontSize:
+                                                                        10,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                    ],
+                                                ),
                                                 Align(
                                                     alignment:
                                                         Alignment.centerLeft,

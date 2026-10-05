@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -62,8 +63,11 @@ class WakeWordController {
     final MethodChannel _platform;
 
     /// Invoked for final transcripts that matched no command phrase —
-    /// the agent loop uses them as LLM queries.
-    final void Function(String transcript)? onTranscript;
+    /// the agent loop uses them as LLM queries. [audio] is the PCM16
+    /// ring-buffer snapshot captured alongside the utterance, used by
+    /// the voice-identification gate.
+    final void Function(String transcript, Uint8List? audio)?
+        onTranscript;
 
     /// Invoked for in-progress (partial) transcripts that matched no
     /// command phrase — the UI uses them as live "hearing" feedback.
@@ -98,7 +102,10 @@ class WakeWordController {
             if (phrase == null || phrase.isEmpty) {
                 if (transcript == null || transcript.isEmpty) return;
                 if (event['final'] == true) {
-                    onTranscript?.call(transcript);
+                    onTranscript?.call(
+                        transcript,
+                        event['audio'] as Uint8List?,
+                    );
                 } else {
                     onPartial?.call(transcript);
                 }

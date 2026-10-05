@@ -107,9 +107,13 @@ class _InstallationGatewayState extends State<InstallationGateway>
     bool _agentBusy = false;
 
     /// Live (in-progress) recognition text — lets the user see speech
-    /// being captured even before a final result exists.
+    /// being captured even before a final result exists. It stays on
+    /// screen until new speech replaces it.
     String _liveTranscript = '';
-    Timer? _liveTranscriptTimer;
+
+    /// The last finalized transcript — stays visible so a fast
+    /// utterance is still readable afterwards.
+    String _lastHeard = '';
 
     /// Suppresses the agent briefly after it speaks so Maxima's own
     /// TTS output cannot retrigger a new query through the mic.
@@ -128,10 +132,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
     final List<VoicePrint> _enrollSamples = [];
     String _voiceStatus = 'voice ID: not enrolled';
 
-    /// Short-lived agent activity line ("thinking...", "voice
-    /// rejected") so agent behavior is visible, not silent.
+    /// Agent activity line ("thinking...", "voice rejected") — stays
+    /// visible until the next event replaces it.
     String _agentStatus = '';
-    Timer? _agentStatusTimer;
 
     String _speechModelStatus = 'speech model: not checked';
     String _speechLang = 'en';
@@ -317,8 +320,6 @@ class _InstallationGatewayState extends State<InstallationGateway>
         _commandInput.dispose();
         _wolMacInput.dispose();
         _hostInput.dispose();
-        _liveTranscriptTimer?.cancel();
-        _agentStatusTimer?.cancel();
         _pulseController.dispose();
         _hueController.dispose();
         _aiGateway?.close();
@@ -591,52 +592,56 @@ class _InstallationGatewayState extends State<InstallationGateway>
             return;
         }
         try {
-            final status =
-                await _platform.invokeMethod<String>('voskModelStatus');
-            final ready = status != null &&
-                status.startsWith('ready') &&
-                _installedModelLang == _speechLang;
+            // Per-language model dirs: switching to a previously
+            // downloaded language is instant, and a failed download
+            // can never leave the wrong model active.
+            final ready = await _platform.invokeMethod<bool>(
+                    'voskModelReady',
+                    {'lang': _speechLang},
+                ) ??
+                false;
             if (ready) {
                 if (mounted) {
-                    setState(() => _speechModelStatus = 'speech model: ready');
+                    setState(() => _speechModelStatus =
+                        'speech model: ready '
+                        '(${_speechLangNames[_speechLang]})');
                 }
-                unawaited(_startWakeWordEngine());
-                return;
-            }
-            if (mounted) {
-                setState(() => _speechModelStatus =
-                    'speech model: downloading '
-                    '${_speechLangNames[_speechLang]}...');
-                _showMessage(
-                    'Downloading speech model '
-                    '(${_speechLangNames[_speechLang]}, ~50 MB)...',
+            } else {
+                if (mounted) {
+                    setState(() => _speechModelStatus =
+                        'speech model: downloading '
+                        '${_speechLangNames[_speechLang]}...');
+                    _showMessage(
+                        'Downloading speech model '
+                        '(${_speechLangNames[_speechLang]}, ~50 MB)...',
+                    );
+                }
+                await _platform.invokeMethod<String>(
+                    'downloadVoskModel',
+                    {
+                        'url': _speechModels[_speechLang],
+                        'lang': _speechLang,
+                    },
                 );
-            }
-            await _platform.invokeMethod<String>(
-                'downloadVoskModel',
-                {'url': _speechModels[_speechLang]},
-            );
-            _installedModelLang = _speechLang;
-            unawaited(
-                _settingsStore.write(
-                    key: 'maxima_speech_lang_installed',
-                    value: _speechLang,
-                ),
-            );
-            if (mounted) {
-                setState(() => _speechModelStatus = 'speech model: ready');
-                _showMessage('Speech model ready.');
-            }
-            // Stop any engine running with the previous model so the
-            // recognizer reloads the new language.
-            try {
-                await _platform.invokeMethod<bool>('stopWakeWordEngine');
-            } catch (_) {
+                _installedModelLang = _speechLang;
+                unawaited(
+                    _settingsStore.write(
+                        key: 'maxima_speech_lang_installed',
+                        value: _speechLang,
+                    ),
+                );
+                if (mounted) {
+                    setState(() => _speechModelStatus =
+                        'speech model: ready '
+                        '(${_speechLangNames[_speechLang]})');
+                    _showMessage('Speech model ready.');
+                }
             }
         } catch (error) {
             if (mounted) {
                 setState(() => _speechModelStatus =
-                    'speech model: download failed');
+                    'speech model: download failed '
+                    '(${_speechLangNames[_speechLang]})');
                 _showMessage('Speech model download failed: $error');
             }
             return;
@@ -658,24 +663,29 @@ class _InstallationGatewayState extends State<InstallationGateway>
     }
 
     /// Live partial transcript straight from Vosk — the proof on
-    /// screen that speech is being captured word by word.
+    /// screen that speech is being captured word by word. Stays
+    /// visible until the next utterance replaces it.
     void _livePartial(String transcript) {
         if (!mounted) return;
-        _liveTranscriptTimer?.cancel();
         setState(() => _liveTranscript = transcript);
-        _liveTranscriptTimer = Timer(
-            const Duration(seconds: 4),
-            () {
-                if (mounted) setState(() => _liveTranscript = '');
-            },
-        );
     }
 
     /// Engine status events forwarded by [WakeWordController]:
     /// `model-missing`, `model-error`, `mic-error`, `listening`.
     void _speechEngineStatus(String status, String? detail) {
         if (!mounted) return;
-        setState(() => _speechModelStatus = 'speech engine: $status');
+        if (status == 'listening' && detail != null) {
+            // The engine reports the language actually loaded — sync
+            // the record so the UI can never lie about which model is
+            // active.
+            _installedModelLang = detail;
+            setState(() => _speechModelStatus =
+                'speech engine: listening ($detail)');
+        } else {
+            setState(() => _speechModelStatus =
+                'speech engine: $status'
+                '${detail != null ? ' — $detail' : ''}');
+        }
         if (status == 'model-missing') {
             unawaited(_ensureSpeechModelThenStart());
         } else if (status == 'listening' && !_greeted) {
@@ -715,18 +725,11 @@ class _InstallationGatewayState extends State<InstallationGateway>
     /// Trigger rules: always respond when the transcript contains the
     /// wake name ("maxima"); otherwise only in agent mode (toggle in
     /// the MICROPHONE panel).
-    /// Updates the short-lived agent status line under the core and
-    /// in the MIC panel, then auto-clears.
+    /// Updates the agent status line under the core and in the MIC
+    /// panel; it persists until the next agent event replaces it.
     void _setAgentStatus(String status) {
         if (!mounted) return;
-        _agentStatusTimer?.cancel();
         setState(() => _agentStatus = status);
-        _agentStatusTimer = Timer(
-            const Duration(seconds: 6),
-            () {
-                if (mounted) setState(() => _agentStatus = '');
-            },
-        );
     }
 
     /// Collects one voiceprint sample during enrollment. Three
@@ -800,7 +803,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
         String transcript,
         Uint8List? audio,
     ) async {
-        if (mounted) setState(() => _liveTranscript = '');
+        if (mounted) {
+            setState(() {
+                _lastHeard = transcript;
+                _liveTranscript = '';
+            });
+        }
         if (_agentBusy) return;
         if (DateTime.now().isBefore(_agentCooldownUntil)) return;
 
@@ -816,11 +824,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
 
         final lower = transcript.toLowerCase();
         // Tolerant wake-name match: small Vosk models split or bend
-        // the name ("maxi ma", "max ima", "maximum", "maxine"), and
+        // the name ("maxi ma", "max ima", "maximum", "máxima"), and
         // the Greek model transcribes it as "μάξιμα". Any word that
-        // begins with "max"/"μάξ"/"μαξ" is treated as the wake name.
+        // begins with "max" (incl. accented) or the Greek forms is
+        // treated as the wake name.
         final wakeMatch = RegExp(
-            r'\b(max\w*|μάξιμα|μαξιμα|μάξιμ)\b',
+            r'\b(m[aáà]x\w*|μάξιμα|μαξιμα|μάξιμ)\b',
         ).firstMatch(lower);
         String? query;
         if (wakeMatch != null) {
@@ -891,8 +900,18 @@ class _InstallationGatewayState extends State<InstallationGateway>
             await _startDesktopStt();
             return;
         }
+        // Always bounce the capture loop so the newly activated model
+        // directory is actually loaded (stop is a no-op when the
+        // engine is not running).
         try {
-            await _platform.invokeMethod<bool>('startWakeWordEngine');
+            await _platform.invokeMethod<bool>('stopWakeWordEngine');
+        } catch (_) {
+        }
+        try {
+            await _platform.invokeMethod<bool>(
+                'startWakeWordEngine',
+                {'lang': _speechLang},
+            );
         } catch (error) {
             _showMessage('Wake-word engine unavailable.');
         }
@@ -1312,7 +1331,10 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                                 ? _agentStatus
                                                                 : _enrollingVoice
                                                                     ? 'ENROLL YOUR VOICE'
-                                                                    : 'LISTENING',
+                                                                    : _lastHeard
+                                                                            .isNotEmpty
+                                                                        ? 'heard: $_lastHeard'
+                                                                        : 'LISTENING',
                                                         textAlign:
                                                             TextAlign.center,
                                                         maxLines: 2,
@@ -1325,7 +1347,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                                             .isNotEmpty ||
                                                                         _agentStatus
                                                                             .isNotEmpty ||
-                                                                        _enrollingVoice)
+                                                                        _enrollingVoice ||
+                                                                        _lastHeard
+                                                                            .isNotEmpty)
                                                                     ? accent
                                                                     : Colors
                                                                         .white38,

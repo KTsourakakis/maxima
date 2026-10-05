@@ -162,6 +162,10 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                 "startWakeWordEngine" -> {
                     @Suppress("UNCHECKED_CAST")
                     val phrases = call.argument<Map<String, String>>("phrases")
+                    val lang = call.argument<String>("lang")
+                    if (!lang.isNullOrBlank()) {
+                        MaximaModelManager.setActive(this, lang)
+                    }
                     MaximaBackgroundService.configureWakeWords(
                         phrases ?: MaximaAudioPipeline.DEFAULT_PHRASES
                     )
@@ -172,15 +176,26 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                     MaximaBackgroundService.stopWakeWords()
                     result.success(true)
                 }
-                "voskModelStatus" -> result.success(
-                    MaximaBackgroundService.pipeline()?.modelStatus()
-                        ?: if (MaximaModelManager.isReady(this)) "ready"
-                        else "missing"
+                "voskModelStatus" -> {
+                    val lang = MaximaModelManager.activeLang(this)
+                    result.success(
+                        MaximaBackgroundService.pipeline()?.modelStatus()
+                            ?: if (MaximaModelManager.isReady(this, lang))
+                                "ready:$lang"
+                            else "missing:$lang"
+                    )
+                }
+                "voskModelReady" -> result.success(
+                    MaximaModelManager.isReady(
+                        this,
+                        call.argument<String>("lang") ?: "en",
+                    )
                 )
                 "downloadVoskModel" -> {
                     val url = call.argument<String>("url")
                         ?: MaximaModelManager.DEFAULT_MODEL_URL
-                    MaximaModelManager.download(this, url) { ok, detail ->
+                    val lang = call.argument<String>("lang") ?: "en"
+                    MaximaModelManager.download(this, url, lang) { ok, detail ->
                         if (ok) result.success(detail)
                         else result.error("MODEL_DOWNLOAD_FAILED", detail, null)
                     }

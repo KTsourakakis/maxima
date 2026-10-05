@@ -78,10 +78,19 @@ class MaximaAudioPipeline(private val context: Context) {
     var muted: Boolean = false
 
     private val modelDir: File
-        get() = File(context.filesDir, "models/vosk-model")
+        get() = MaximaModelManager.modelDir(
+            context,
+            MaximaModelManager.activeLang(context),
+        )
 
     @Volatile
     private var running = false
+
+    // Bumped on every start/stop so a worker parked in the
+    // model-retry sleep can never come back to life after a restart
+    // and compete for the microphone.
+    @Volatile
+    private var generation = 0
     private var worker: Thread? = null
     private var recorderFile: AtomicReference<FileOutputStream?> =
         AtomicReference(null)
@@ -108,11 +117,13 @@ class MaximaAudioPipeline(private val context: Context) {
     fun start() {
         if (running) return
         running = true
-        worker = Thread({ runLoop() }, "maxima-audio").apply { start() }
+        val gen = ++generation
+        worker = Thread({ runLoop(gen) }, "maxima-audio").apply { start() }
     }
 
     fun stop() {
         running = false
+        generation++
         worker?.join(2000)
         worker = null
         stopPcmRecording()
@@ -153,17 +164,19 @@ class MaximaAudioPipeline(private val context: Context) {
     }
 
     fun modelStatus(): String {
+        val lang = MaximaModelManager.activeLang(context)
         return if (File(modelDir, "am").exists() ||
             File(modelDir, "graph").exists() ||
             modelDir.listFiles()?.isNotEmpty() == true
         ) {
-            "ready:${modelDir.absolutePath}"
+            "ready:$lang"
         } else {
-            "missing:${modelDir.absolutePath}"
+            "missing:$lang"
         }
     }
 
-    private fun runLoop() {
+    private fun runLoop(gen: Int) {
+        fun alive() = running && generation == gen
         LibVosk.setLogLevel(LogLevel.WARNINGS)
 
         var recognizer: Recognizer? = null
@@ -173,7 +186,7 @@ class MaximaAudioPipeline(private val context: Context) {
         // The model may still be downloading when the service starts.
         // Keep retrying so the recognizer self-heals instead of running
         // deaf with a live microphone until the next cold start.
-        while (running && recognizer == null) {
+        while (alive() && recognizer == null) {
             try {
                 if (File(modelDir, "am").exists() ||
                     File(modelDir, "conf/model.conf").exists() ||
@@ -184,7 +197,11 @@ class MaximaAudioPipeline(private val context: Context) {
                     recognizer.setWords(true)
                     recognizer.setPartialWords(true)
                     MaximaWakeWordBus.emit(
-                        mapOf("status" to "listening")
+                        mapOf(
+                            "status" to "listening",
+                            "detail" to MaximaModelManager
+                                .activeLang(context),
+                        )
                     )
                 }
             } catch (error: Exception) {
@@ -224,7 +241,7 @@ class MaximaAudioPipeline(private val context: Context) {
                 }
             }
         }
-        if (!running) {
+        if (!alive()) {
             recognizer?.close()
             model?.close()
             return
@@ -264,7 +281,7 @@ class MaximaAudioPipeline(private val context: Context) {
 
         val frame = ShortArray(2048)
         try {
-            while (running) {
+            while (alive()) {
                 val read = audioRecord.read(frame, 0, frame.size)
                 if (read <= 0) continue
 

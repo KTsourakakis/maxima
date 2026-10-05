@@ -11,12 +11,13 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
 /**
- * Fetches and unpacks a Vosk acoustic model into
- * `<filesDir>/models/vosk-model`.
+ * Fetches and unpacks Vosk acoustic models into per-language
+ * directories `<filesDir>/models/vosk-model-<lang>`.
  *
- * Small models (~40-50 MB) such as `vosk-model-small-en-us-0.15` or
- * `vosk-model-small-el` fit comfortably; the zip root folder is
- * flattened into `vosk-model`.
+ * A `models/active.txt` marker names the language the recognizer
+ * should load, so switching back to a previously downloaded
+ * language is instant — no re-download, and a failed download can
+ * never leave the engine running the wrong language.
  */
 object MaximaModelManager {
     const val DEFAULT_MODEL_URL =
@@ -25,22 +26,63 @@ object MaximaModelManager {
     @Volatile
     private var downloading = false
 
-    fun modelDir(context: Context): File =
-        File(context.filesDir, "models/vosk-model")
+    fun modelsRoot(context: Context): File =
+        File(context.filesDir, "models")
 
-    fun isReady(context: Context): Boolean {
-        val dir = modelDir(context)
+    fun modelDir(context: Context, lang: String): File =
+        File(modelsRoot(context), "vosk-model-$lang")
+
+    /** The language tag the engine should currently load. */
+    fun activeLang(context: Context): String {
+        val marker = File(modelsRoot(context), "active.txt")
+        if (!marker.exists()) {
+            // Migrate a pre-multilingual install: the flat model
+            // directory becomes the English model.
+            val legacy = File(modelsRoot(context), "vosk-model")
+            if (legacy.isDirectory &&
+                legacy.listFiles()?.isNotEmpty() == true
+            ) {
+                try {
+                    legacy.renameTo(modelDir(context, "en"))
+                } catch (_: Exception) {
+                }
+            }
+            try {
+                modelsRoot(context).mkdirs()
+                marker.writeText("en")
+            } catch (_: Exception) {
+            }
+        }
+        return try {
+            marker.readText().trim().ifEmpty { "en" }
+        } catch (_: Exception) {
+            "en"
+        }
+    }
+
+    /** Marks [lang] as the model the recognizer loads on next start. */
+    fun setActive(context: Context, lang: String) {
+        try {
+            modelsRoot(context).mkdirs()
+            File(modelsRoot(context), "active.txt").writeText(lang)
+        } catch (_: Exception) {
+        }
+    }
+
+    fun isReady(context: Context, lang: String): Boolean {
+        val dir = modelDir(context, lang)
         return dir.isDirectory &&
             (dir.listFiles()?.isNotEmpty() == true)
     }
 
     /**
-     * Downloads [url] and unpacks it into the model directory.
-     * [callback] runs on the main thread with a status string.
+     * Downloads [url] and unpacks it into the per-language model
+     * directory for [lang]. [callback] runs on the main thread.
      */
     fun download(
         context: Context,
         url: String,
+        lang: String,
         callback: (Boolean, String) -> Unit,
     ) {
         if (downloading) {
@@ -51,14 +93,14 @@ object MaximaModelManager {
         val appContext = context.applicationContext
         Thread({
             val result = try {
-                fetchAndUnpack(appContext, url)
+                fetchAndUnpack(appContext, url, lang)
             } catch (error: Exception) {
                 "error:${error.message}"
             }
             downloading = false
             Handler(Looper.getMainLooper()).post {
                 if (result == "ok") {
-                    callback(true, modelDir(appContext).absolutePath)
+                    callback(true, modelDir(appContext, lang).absolutePath)
                 } else {
                     callback(false, result)
                 }
@@ -66,7 +108,11 @@ object MaximaModelManager {
         }, "maxima-model-download").start()
     }
 
-    private fun fetchAndUnpack(context: Context, url: String): String {
+    private fun fetchAndUnpack(
+        context: Context,
+        url: String,
+        lang: String,
+    ): String {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15000
         connection.readTimeout = 60000
@@ -76,7 +122,7 @@ object MaximaModelManager {
             if (connection.responseCode !in 200..299) {
                 return "http:${connection.responseCode}"
             }
-            val target = modelDir(context)
+            val target = modelDir(context, lang)
             val staging = File(
                 context.cacheDir,
                 "vosk-model-${System.currentTimeMillis()}"

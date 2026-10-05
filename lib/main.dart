@@ -1226,9 +1226,14 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 : MediaQuery.sizeOf(context).width * 0.45,
                             decoration: BoxDecoration(
                                 color: Colors.black.withAlpha(210),
-                                shape: _expanded
-                                    ? BoxShape.rectangle
-                                    : BoxShape.circle,
+                                // Always a rectangle: the collapsed
+                                // "circle" is just a borderRadius
+                                // clamped to half the box, so the
+                                // expand/collapse lerp never mixes
+                                // BoxShape.circle with a radius.
+                                borderRadius: BorderRadius.circular(
+                                    _expanded ? 16 : 2000,
+                                ),
                                 border: Border.all(
                                     color: accent,
                                     width: 1.5 + 3 * pulse,
@@ -1251,9 +1256,6 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                         spreadRadius: 8 + 18 * pulse,
                                     ),
                                 ],
-                                borderRadius: _expanded
-                                    ? BorderRadius.circular(16)
-                                    : null,
                             ),
                             child: Center(
                                 child: _expanded

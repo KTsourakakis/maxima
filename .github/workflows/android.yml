@@ -37,11 +37,7 @@ jobs:
             - name: Raise Gradle memory for CI
               # gradle.properties is tuned for a 3 GB dev laptop; CI runners
               # need a full-size heap and metaspace for AGP/Kotlin/dexing.
-              run: >
-                  sed -i
-                  's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError/;
-                   s/^kotlin.daemon.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1g/'
-                  android/gradle.properties
+              run: sed -i -e 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError/' -e 's/^kotlin.daemon.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1g/' android/gradle.properties
             - name: Build APK (debug)
               run: >
                   flutter build apk --debug

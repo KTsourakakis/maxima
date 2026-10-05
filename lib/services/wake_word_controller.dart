@@ -29,6 +29,8 @@ class WakeWordController {
         MethodChannel platform =
             const MethodChannel('aura.straton.maxima/accessibility'),
         Stream<dynamic>? nativeEvents,
+        this.onTranscript,
+        this.onStatus,
     })  : _accessControl = accessControl,
           _nativeBridge = nativeBridge,
           _search = search,
@@ -58,6 +60,13 @@ class WakeWordController {
     String? _recordingsDirectory;
     final MethodChannel _platform;
 
+    /// Invoked for final transcripts that matched no command phrase —
+    /// the agent loop uses them as LLM queries.
+    final void Function(String transcript)? onTranscript;
+
+    /// Invoked for engine status events (`model-missing`, `mic-error`...).
+    final void Function(String status, String? detail)? onStatus;
+
     /// Directory where sealed `.mxenc` recordings are written.
     /// Populated asynchronously from the platform `files` directory.
     set recordingsDirectory(String? value) => _recordingsDirectory = value;
@@ -71,12 +80,26 @@ class WakeWordController {
         _eventSubscription?.cancel();
         _eventSubscription = nativeEvents.listen((event) {
             if (event is! Map) return;
+            final status = event['status'] as String?;
+            if (status != null) {
+                onStatus?.call(
+                    status,
+                    (event['detail'] ?? event['path']) as String?,
+                );
+                return;
+            }
             final phrase = event['phrase'] as String?;
-            final action = phrase == null
-                ? null
-                : defaultPhraseMap[phrase.toLowerCase()];
-            if (action == null) return;
             final transcript = event['transcript'] as String?;
+            if (phrase == null || phrase.isEmpty) {
+                if (event['final'] == true &&
+                    transcript != null &&
+                    transcript.isNotEmpty) {
+                    onTranscript?.call(transcript);
+                }
+                return;
+            }
+            final action = defaultPhraseMap[phrase.toLowerCase()];
+            if (action == null) return;
             unawaited(handle(action, transcript: transcript));
         });
     }

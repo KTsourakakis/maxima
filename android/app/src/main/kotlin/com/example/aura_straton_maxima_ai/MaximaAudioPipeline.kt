@@ -278,8 +278,10 @@ class MaximaAudioPipeline(private val context: Context) {
         }
         if (transcript.isBlank()) return
 
+        var matched = false
         for ((phrase, key) in phrases) {
             if (!transcript.lowercase().contains(phrase)) continue
+            matched = true
             val now = System.currentTimeMillis()
             val last = lastFiredAt[key] ?: 0L
             if (!complete && now - last < 2000) continue
@@ -289,6 +291,19 @@ class MaximaAudioPipeline(private val context: Context) {
                     "phrase" to key,
                     "transcript" to transcript,
                     "final" to complete,
+                )
+            )
+        }
+
+        // Unmatched final transcripts still reach Dart so the agent
+        // loop can forward them to the LLM; partials stay wake-word
+        // only to avoid spamming the channel.
+        if (!matched && complete) {
+            MaximaWakeWordBus.emit(
+                mapOf(
+                    "phrase" to "",
+                    "transcript" to transcript,
+                    "final" to true,
                 )
             )
         }

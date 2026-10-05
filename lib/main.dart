@@ -70,6 +70,8 @@ class _InstallationGatewayState extends State<InstallationGateway>
         recorder: _recorder,
         sipClient: _sip,
         nativeEvents: _wakeWordEvents.receiveBroadcastStream(),
+        onTranscript: _agentTranscript,
+        onStatus: _speechEngineStatus,
     );
 
     final TextEditingController _translationInput = TextEditingController();
@@ -88,6 +90,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
     bool _requestingPermissions = false;
     bool _translating = false;
     bool _microphoneMuted = false;
+    bool _agentMode = false;
+    bool _agentBusy = false;
+    String _speechModelStatus = 'speech model: not checked';
     double _batteryThreshold = 15;
     String _name = 'MAXIMA';
     String _targetLanguage = 'Greek';
@@ -270,7 +275,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
             if (!granted) {
                 _showMessage('Required permissions were not granted.');
             } else {
-                unawaited(_startWakeWordEngine());
+                unawaited(_ensureSpeechModelThenStart());
             }
         } on PlatformException catch (error) {
             if (!mounted) return;
@@ -279,6 +284,116 @@ class _InstallationGatewayState extends State<InstallationGateway>
             if (mounted) {
                 setState(() => _requestingPermissions = false);
             }
+        }
+    }
+
+    /// Ensures the Vosk speech model exists (downloading it on first
+    /// run) before starting the wake-word engine. Without the model
+    /// the recognizer never initializes and speech is silently dropped.
+    Future<void> _ensureSpeechModelThenStart() async {
+        if (!_hasPlatformChannel) {
+            unawaited(_startWakeWordEngine());
+            return;
+        }
+        try {
+            final status =
+                await _platform.invokeMethod<String>('voskModelStatus');
+            if (status != null && status.startsWith('ready')) {
+                if (mounted) {
+                    setState(() => _speechModelStatus = 'speech model: ready');
+                }
+                unawaited(_startWakeWordEngine());
+                return;
+            }
+            if (mounted) {
+                setState(() => _speechModelStatus =
+                    'speech model: downloading...');
+                _showMessage(
+                    'Downloading speech model (first run, ~50 MB)...',
+                );
+            }
+            await _platform.invokeMethod<String>('downloadVoskModel');
+            if (mounted) {
+                setState(() => _speechModelStatus = 'speech model: ready');
+                _showMessage('Speech model ready.');
+            }
+        } catch (error) {
+            if (mounted) {
+                setState(() => _speechModelStatus =
+                    'speech model: download failed');
+                _showMessage('Speech model download failed: $error');
+            }
+            return;
+        }
+        unawaited(_startWakeWordEngine());
+    }
+
+    /// Engine status events forwarded by [WakeWordController]:
+    /// `model-missing`, `model-error`, `mic-error`.
+    void _speechEngineStatus(String status, String? detail) {
+        if (!mounted) return;
+        setState(() => _speechModelStatus = 'speech engine: $status');
+        if (status == 'model-missing') {
+            unawaited(_ensureSpeechModelThenStart());
+        }
+    }
+
+    /// The agent loop: an unmatched final transcript becomes a query
+    /// to the remote Qwen gateway; the answer is spoken via TTS and
+    /// shown in the output pane.
+    ///
+    /// Trigger rules: always respond when the transcript contains the
+    /// wake name ("maxima"); otherwise only in agent mode (toggle in
+    /// the MICROPHONE panel).
+    Future<void> _agentTranscript(String transcript) async {
+        if (_agentBusy) return;
+
+        final lower = transcript.toLowerCase();
+        String? query;
+        if (lower.contains('maxima')) {
+            final after = lower.split('maxima').last.trim();
+            if (after.length < 3) {
+                await _speak('I am listening.');
+                return;
+            }
+            final idx = transcript.toLowerCase().lastIndexOf('maxima');
+            query = transcript.substring(idx + 'maxima'.length).trim();
+        } else if (_agentMode) {
+            query = transcript.trim();
+        }
+        if (query == null || query.length < 3) return;
+
+        final gateway = _aiGateway;
+        if (gateway == null) {
+            _showMessage('Set the host IP in REMOTE AI to talk to Maxima.');
+            return;
+        }
+
+        _agentBusy = true;
+        try {
+            final answer = await gateway.generate(
+                query,
+                system: 'You are Maxima, a concise voice assistant. '
+                    'Answer briefly in plain spoken sentences.',
+            );
+            if (!mounted || answer.isEmpty) return;
+            setState(() => _translationOutput = 'You: $transcript\n\n$answer');
+            await _speak(answer);
+        } catch (error) {
+            _showMessage('Agent query failed: $error');
+        } finally {
+            _agentBusy = false;
+        }
+    }
+
+    Future<void> _speak(String text) async {
+        if (!_hasPlatformChannel) return;
+        try {
+            await _platform.invokeMethod<void>(
+                'speakText',
+                {'text': text},
+            );
+        } catch (_) {
         }
     }
 
@@ -867,20 +982,61 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 tile(
                                     _panel(
                                         title: 'MICROPHONE',
-                                        child: Row(
+                                        child: Column(
+                                            mainAxisSize: MainAxisSize.min,
                                             children: [
-                                                const Expanded(
+                                                Row(
+                                                    children: [
+                                                        const Expanded(
+                                                            child: Text(
+                                                                'Compliant mute',
+                                                                style:
+                                                                    TextStyle(
+                                                                    fontSize:
+                                                                        12,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        Switch(
+                                                            value:
+                                                                _microphoneMuted,
+                                                            onChanged:
+                                                                _setMicrophoneMuted,
+                                                        ),
+                                                    ],
+                                                ),
+                                                Row(
+                                                    children: [
+                                                        const Expanded(
+                                                            child: Text(
+                                                                'Agent mode (all speech -> Qwen)',
+                                                                style:
+                                                                    TextStyle(
+                                                                    fontSize:
+                                                                        12,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        Switch(
+                                                            value: _agentMode,
+                                                            onChanged: (v) =>
+                                                                setState(() =>
+                                                                    _agentMode =
+                                                                        v),
+                                                        ),
+                                                    ],
+                                                ),
+                                                Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
                                                     child: Text(
-                                                        'Compliant mute',
-                                                        style: TextStyle(
-                                                            fontSize: 12,
+                                                        _speechModelStatus,
+                                                        style: const TextStyle(
+                                                            color:
+                                                                Colors.white38,
+                                                            fontSize: 10,
                                                         ),
                                                     ),
-                                                ),
-                                                Switch(
-                                                    value: _microphoneMuted,
-                                                    onChanged:
-                                                        _setMicrophoneMuted,
                                                 ),
                                             ],
                                         ),

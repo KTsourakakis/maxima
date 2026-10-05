@@ -56,6 +56,10 @@ class MaximaBackgroundService : Service() {
 
         fun stopWakeWords() {
             wakeWordPhrases = null
+            // Actually halt the capture loop; the previous version left
+            // the pipeline running, so a later start() early-returned
+            // and a newly downloaded model was never picked up.
+            activeInstance?.audioPipeline?.stop()
         }
 
         /** Shared audio pipeline, null until the service is running. */

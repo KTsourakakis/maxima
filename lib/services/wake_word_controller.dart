@@ -30,6 +30,7 @@ class WakeWordController {
             const MethodChannel('aura.straton.maxima/accessibility'),
         Stream<dynamic>? nativeEvents,
         this.onTranscript,
+        this.onPartial,
         this.onStatus,
     })  : _accessControl = accessControl,
           _nativeBridge = nativeBridge,
@@ -64,6 +65,10 @@ class WakeWordController {
     /// the agent loop uses them as LLM queries.
     final void Function(String transcript)? onTranscript;
 
+    /// Invoked for in-progress (partial) transcripts that matched no
+    /// command phrase — the UI uses them as live "hearing" feedback.
+    final void Function(String transcript)? onPartial;
+
     /// Invoked for engine status events (`model-missing`, `mic-error`...).
     final void Function(String status, String? detail)? onStatus;
 
@@ -91,10 +96,11 @@ class WakeWordController {
             final phrase = event['phrase'] as String?;
             final transcript = event['transcript'] as String?;
             if (phrase == null || phrase.isEmpty) {
-                if (event['final'] == true &&
-                    transcript != null &&
-                    transcript.isNotEmpty) {
+                if (transcript == null || transcript.isEmpty) return;
+                if (event['final'] == true) {
                     onTranscript?.call(transcript);
+                } else {
+                    onPartial?.call(transcript);
                 }
                 return;
             }

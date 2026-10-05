@@ -91,6 +91,8 @@ class MaximaAudioPipeline(private val context: Context) {
     private var voiceBuffer = ArrayList<Byte>()
     private var voiceRemainingMs = 0
     private val lastFiredAt = HashMap<String, Long>()
+    @Volatile
+    private var lastPartialEmittedAt = 0L
 
     val isRunning: Boolean get() = running
 
@@ -157,30 +159,66 @@ class MaximaAudioPipeline(private val context: Context) {
 
         var recognizer: Recognizer? = null
         var model: Model? = null
-        try {
-            if (File(modelDir, "am").exists() ||
-                File(modelDir, "conf/model.conf").exists() ||
-                modelDir.listFiles()?.isNotEmpty() == true
-            ) {
-                model = Model(modelDir.absolutePath)
-                recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
-                recognizer.setWords(true)
-                recognizer.setPartialWords(true)
-            } else {
-                MaximaWakeWordBus.emit(
-                    mapOf(
-                        "status" to "model-missing",
-                        "path" to modelDir.absolutePath,
+        var reportedMissing = false
+
+        // The model may still be downloading when the service starts.
+        // Keep retrying so the recognizer self-heals instead of running
+        // deaf with a live microphone until the next cold start.
+        while (running && recognizer == null) {
+            try {
+                if (File(modelDir, "am").exists() ||
+                    File(modelDir, "conf/model.conf").exists() ||
+                    modelDir.listFiles()?.isNotEmpty() == true
+                ) {
+                    model = Model(modelDir.absolutePath)
+                    recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
+                    recognizer.setWords(true)
+                    recognizer.setPartialWords(true)
+                    MaximaWakeWordBus.emit(
+                        mapOf("status" to "listening")
                     )
-                )
+                }
+            } catch (error: Exception) {
+                try {
+                    recognizer?.close()
+                } catch (_: Exception) {
+                }
+                recognizer = null
+                try {
+                    model?.close()
+                } catch (_: Exception) {
+                }
+                model = null
+                if (!reportedMissing) {
+                    reportedMissing = true
+                    MaximaWakeWordBus.emit(
+                        mapOf(
+                            "status" to "model-error",
+                            "detail" to (error.message ?: "model load failed"),
+                        )
+                    )
+                }
             }
-        } catch (error: Exception) {
-            MaximaWakeWordBus.emit(
-                mapOf(
-                    "status" to "model-error",
-                    "detail" to (error.message ?: "model load failed"),
-                )
-            )
+            if (recognizer == null) {
+                if (!reportedMissing) {
+                    reportedMissing = true
+                    MaximaWakeWordBus.emit(
+                        mapOf(
+                            "status" to "model-missing",
+                            "path" to modelDir.absolutePath,
+                        )
+                    )
+                }
+                try {
+                    Thread.sleep(2000)
+                } catch (_: InterruptedException) {
+                }
+            }
+        }
+        if (!running) {
+            recognizer?.close()
+            model?.close()
+            return
         }
 
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -295,17 +333,31 @@ class MaximaAudioPipeline(private val context: Context) {
             )
         }
 
-        // Unmatched final transcripts still reach Dart so the agent
-        // loop can forward them to the LLM; partials stay wake-word
-        // only to avoid spamming the channel.
-        if (!matched && complete) {
-            MaximaWakeWordBus.emit(
-                mapOf(
-                    "phrase" to "",
-                    "transcript" to transcript,
-                    "final" to true,
+        // Unmatched transcripts reach Dart: finals drive the agent
+        // loop; partials are throttled so the UI can show live
+        // "hearing: ..." feedback without flooding the channel.
+        if (!matched) {
+            if (complete) {
+                MaximaWakeWordBus.emit(
+                    mapOf(
+                        "phrase" to "",
+                        "transcript" to transcript,
+                        "final" to true,
+                    )
                 )
-            )
+            } else {
+                val now = System.currentTimeMillis()
+                if (now - lastPartialEmittedAt > 350) {
+                    lastPartialEmittedAt = now
+                    MaximaWakeWordBus.emit(
+                        mapOf(
+                            "phrase" to "",
+                            "transcript" to transcript,
+                            "final" to false,
+                        )
+                    )
+                }
+            }
         }
     }
 }

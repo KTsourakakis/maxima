@@ -79,6 +79,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
         sipClient: _sip,
         nativeEvents: _wakeWordEvents.receiveBroadcastStream(),
         onTranscript: _agentTranscript,
+        onPartial: _livePartial,
         onStatus: _speechEngineStatus,
     );
 
@@ -89,6 +90,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
 
     late final AnimationController _pulseController;
     late final Animation<double> _pulseAnimation;
+    late final AnimationController _hueController;
 
     DesktopSttEngine? _desktopStt;
     AccessControl _accessControl = const AccessControl(ClientRank.premium);
@@ -100,6 +102,20 @@ class _InstallationGatewayState extends State<InstallationGateway>
     bool _microphoneMuted = false;
     bool _agentMode = false;
     bool _agentBusy = false;
+
+    /// Live (in-progress) recognition text — lets the user see speech
+    /// being captured even before a final result exists.
+    String _liveTranscript = '';
+    Timer? _liveTranscriptTimer;
+
+    /// Suppresses the agent briefly after it speaks so Maxima's own
+    /// TTS output cannot retrigger a new query through the mic.
+    DateTime _agentCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+    /// When true the core cycles through the hue spectrum; color
+    /// commands (red/green/gold/blue) pin a fixed accent instead.
+    bool _colorCycle = true;
+    bool _greeted = false;
     String _speechModelStatus = 'speech model: not checked';
     String _speechLang = 'en';
     String? _installedModelLang;
@@ -134,6 +150,15 @@ class _InstallationGatewayState extends State<InstallationGateway>
     String _gatewayStatus = 'Checking remote AI gateway...';
     Color _color = Colors.blueGrey;
 
+    /// The live accent: hue-cycled while [_colorCycle] is on, else the
+    /// fixed color chosen by a voice/text command. Read inside the
+    /// pulsing-core AnimatedBuilder so it tracks the animation frame.
+    Color get _accent => _colorCycle
+        ? HSVColor.fromAHSV(
+                1, _hueController.value * 360, 0.85, 0.95)
+            .toColor()
+        : _color;
+
     @override
     void initState() {
         super.initState();
@@ -147,6 +172,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
                 curve: Curves.easeInOut,
             ),
         );
+        // Full-spectrum color morph: one revolution every ~9s,
+        // independent of the breathing pulse.
+        _hueController = AnimationController(
+            duration: const Duration(milliseconds: 9000),
+            vsync: this,
+        )..repeat();
         unawaited(_restoreHost());
         unawaited(_checkGateway());
         unawaited(_seedKnowledge());
@@ -196,7 +227,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
         _commandInput.dispose();
         _wolMacInput.dispose();
         _hostInput.dispose();
+        _liveTranscriptTimer?.cancel();
         _pulseController.dispose();
+        _hueController.dispose();
         _aiGateway?.close();
         _remoteHost?.close();
         unawaited(_desktopStt?.dispose());
@@ -227,6 +260,19 @@ class _InstallationGatewayState extends State<InstallationGateway>
         // Wi-Fi so the laptop is found with zero typing.
         if (_aiGateway == null) {
             unawaited(_autoDiscoverHost());
+        }
+        // A completed first run skips the install gate entirely:
+        // on every later launch the app boots straight into the
+        // listening core and starts the voice-recognition protocol
+        // (permissions are already granted, so this is immediate).
+        try {
+            final done =
+                await _settingsStore.read(key: 'maxima_installed');
+            if (done == '1' && !_installed && mounted) {
+                setState(() => _installed = true);
+                unawaited(_runInstall());
+            }
+        } catch (_) {
         }
     }
 
@@ -411,6 +457,20 @@ class _InstallationGatewayState extends State<InstallationGateway>
             if (!granted) {
                 _showMessage('Required permissions were not granted.');
             } else {
+                unawaited(
+                    _settingsStore.write(
+                        key: 'maxima_installed',
+                        value: '1',
+                    ),
+                );
+                // FORCE_BLACK halts both animations; re-arm them so a
+                // reinstall brings the pulse and color cycle back.
+                if (!_pulseController.isAnimating) {
+                    _pulseController.repeat(reverse: true);
+                }
+                if (!_hueController.isAnimating) {
+                    _hueController.repeat();
+                }
                 unawaited(_ensureSpeechModelThenStart());
             }
         } on PlatformException catch (error) {
@@ -498,13 +558,39 @@ class _InstallationGatewayState extends State<InstallationGateway>
         unawaited(_ensureSpeechModelThenStart());
     }
 
+    /// Live partial transcript straight from Vosk — the proof on
+    /// screen that speech is being captured word by word.
+    void _livePartial(String transcript) {
+        if (!mounted) return;
+        _liveTranscriptTimer?.cancel();
+        setState(() => _liveTranscript = transcript);
+        _liveTranscriptTimer = Timer(
+            const Duration(seconds: 4),
+            () {
+                if (mounted) setState(() => _liveTranscript = '');
+            },
+        );
+    }
+
     /// Engine status events forwarded by [WakeWordController]:
-    /// `model-missing`, `model-error`, `mic-error`.
+    /// `model-missing`, `model-error`, `mic-error`, `listening`.
     void _speechEngineStatus(String status, String? detail) {
         if (!mounted) return;
         setState(() => _speechModelStatus = 'speech engine: $status');
         if (status == 'model-missing') {
             unawaited(_ensureSpeechModelThenStart());
+        } else if (status == 'listening' && !_greeted) {
+            // The voice-recognition protocol announces itself once per
+            // app run so the user knows — audibly — that the mic is
+            // live and the recognizer is ready.
+            _greeted = true;
+            unawaited(
+                _speak(
+                    'Maxima online. I am listening. '
+                    'Say my name, then your question.',
+                    lang: _speechLang,
+                ),
+            );
         }
     }
 
@@ -516,19 +602,32 @@ class _InstallationGatewayState extends State<InstallationGateway>
     /// wake name ("maxima"); otherwise only in agent mode (toggle in
     /// the MICROPHONE panel).
     Future<void> _agentTranscript(String transcript) async {
+        if (mounted) setState(() => _liveTranscript = '');
         if (_agentBusy) return;
+        if (DateTime.now().isBefore(_agentCooldownUntil)) return;
 
         final lower = transcript.toLowerCase();
-        // Vosk's small model may split the wake name ("maxi ma",
-        // "max ima"); the Greek model transcribes it as "μάξιμα".
-        final wakeMatch =
-            RegExp(r'max\s*i\s*ma|μάξιμα|μαξιμα').firstMatch(lower);
+        // Tolerant wake-name match: small Vosk models split or bend
+        // the name ("maxi ma", "max ima", "maximum", "maxine"), and
+        // the Greek model transcribes it as "μάξιμα". Any word that
+        // begins with "max"/"μάξ"/"μαξ" is treated as the wake name.
+        final wakeMatch = RegExp(
+            r'\b(max\w*|μάξιμα|μαξιμα|μάξιμ)\b',
+        ).firstMatch(lower);
         String? query;
         if (wakeMatch != null) {
-            final after =
-                transcript.substring(wakeMatch.end).trim();
+            var after = transcript.substring(wakeMatch.end).trim();
+            // The tail of a split wake name ("ma", "i ma") sometimes
+            // survives as a leading fragment of the query — drop it.
+            after = after.replaceFirst(
+                RegExp(r'^(ma|i\s*ma|ima|ina|imum|ine|ime)\b\s*'),
+                '',
+            );
             if (after.length < 3) {
-                await _speak('I am listening.');
+                await _speak('I am listening.', lang: _speechLang);
+                _agentCooldownUntil = DateTime.now().add(
+                    const Duration(seconds: 3),
+                );
                 return;
             }
             query = after;
@@ -558,6 +657,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
             _showMessage('Agent query failed: $error');
         } finally {
             _agentBusy = false;
+            _agentCooldownUntil = DateTime.now().add(
+                const Duration(seconds: 3),
+            );
         }
     }
 
@@ -620,6 +722,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
             timing = null;
         }
         _pulseController.stop();
+        _hueController.stop();
         if (!mounted) return;
         setState(() {
             _timingOutput = timing == null
@@ -789,14 +892,30 @@ class _InstallationGatewayState extends State<InstallationGateway>
             setState(() {
                 _name = _commandInput.text.substring(5).trim().toUpperCase();
             });
+        } else if (command.contains('rainbow') ||
+            command.contains('spectrum') ||
+            command.contains('auto color')) {
+            setState(() => _colorCycle = true);
         } else if (command.contains('red')) {
-            setState(() => _color = Colors.redAccent);
+            setState(() {
+                _color = Colors.redAccent;
+                _colorCycle = false;
+            });
         } else if (command.contains('green')) {
-            setState(() => _color = Colors.greenAccent);
+            setState(() {
+                _color = Colors.greenAccent;
+                _colorCycle = false;
+            });
         } else if (command.contains('gold')) {
-            setState(() => _color = Colors.amberAccent);
+            setState(() {
+                _color = Colors.amberAccent;
+                _colorCycle = false;
+            });
         } else if (command.contains('blue')) {
-            setState(() => _color = Colors.lightBlueAccent);
+            setState(() {
+                _color = Colors.lightBlueAccent;
+                _colorCycle = false;
+            });
         }
         _commandInput.clear();
     }
@@ -851,13 +970,38 @@ class _InstallationGatewayState extends State<InstallationGateway>
 
     Widget _buildPulsingCore() {
         return AnimatedBuilder(
-            animation: _pulseAnimation,
+            animation: Listenable.merge([_pulseController, _hueController]),
             builder: (context, child) {
+                final hue = _hueController.value * 360;
+                // Default mode morphs through the full spectrum; a
+                // fixed color command (red/green/gold/blue) pins it.
+                final accent = _colorCycle
+                    ? HSVColor.fromAHSV(1, hue, 0.85, 0.95).toColor()
+                    : _color;
+                final complement = _colorCycle
+                    ? HSVColor.fromAHSV(1, (hue + 140) % 360, 0.9, 0.85)
+                        .toColor()
+                    : _color;
+                final pulse = _pulseAnimation.value;
                 return Container(
                     width: double.infinity,
                     height: double.infinity,
-                    color: _color.withAlpha(
-                        (25 + 55 * _pulseAnimation.value).round(),
+                    decoration: BoxDecoration(
+                        // The morphing color field wraps the whole
+                        // screen, not just the circle.
+                        gradient: RadialGradient(
+                            radius: 1.4,
+                            colors: [
+                                accent.withAlpha(
+                                    (55 + 110 * pulse).round(),
+                                ),
+                                complement.withAlpha(
+                                    (20 + 45 * pulse).round(),
+                                ),
+                                Colors.black,
+                            ],
+                            stops: const [0.0, 0.55, 1.0],
+                        ),
                     ),
                     child: Center(
                         child: AnimatedContainer(
@@ -869,26 +1013,30 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 ? MediaQuery.sizeOf(context).height * 0.94
                                 : MediaQuery.sizeOf(context).width * 0.45,
                             decoration: BoxDecoration(
-                                color: Colors.black,
+                                color: Colors.black.withAlpha(210),
                                 shape: _expanded
                                     ? BoxShape.rectangle
                                     : BoxShape.circle,
                                 border: Border.all(
-                                    color: _color,
-                                    width: 1.5 + 3 * _pulseAnimation.value,
+                                    color: accent,
+                                    width: 1.5 + 3 * pulse,
                                 ),
                                 boxShadow: [
                                     BoxShadow(
-                                        color: _color.withAlpha(
-                                            (30 +
-                                                    190 *
-                                                        _pulseAnimation.value)
+                                        color: accent.withAlpha(
+                                            (60 +
+                                                    190 * pulse)
                                                 .round(),
                                         ),
-                                        blurRadius:
-                                            25 + 55 * _pulseAnimation.value,
-                                        spreadRadius:
-                                            2 + 10 * _pulseAnimation.value,
+                                        blurRadius: 30 + 70 * pulse,
+                                        spreadRadius: 3 + 12 * pulse,
+                                    ),
+                                    BoxShadow(
+                                        color: complement.withAlpha(
+                                            (40 + 120 * pulse).round(),
+                                        ),
+                                        blurRadius: 60 + 90 * pulse,
+                                        spreadRadius: 8 + 18 * pulse,
                                     ),
                                 ],
                                 borderRadius: _expanded
@@ -902,22 +1050,73 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                         onTap: () => setState(
                                             () => _expanded = true,
                                         ),
-                                        child: Text(
-                                            _name,
-                                            style: TextStyle(
-                                                color: _color,
-                                                fontSize: 22,
-                                                fontWeight: FontWeight.bold,
-                                                letterSpacing: 2,
-                                                shadows: [
-                                                    Shadow(
-                                                        color: _color
-                                                            .withAlpha(200),
-                                                        blurRadius: 18,
+                                        child: Padding(
+                                            padding:
+                                                const EdgeInsets.all(12),
+                                            child: Column(
+                                                mainAxisSize:
+                                                    MainAxisSize.min,
+                                                children: [
+                                                    Text(
+                                                        _name,
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                        style: TextStyle(
+                                                            color: accent,
+                                                            fontSize: 22,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .bold,
+                                                            letterSpacing: 2,
+                                                            shadows: [
+                                                                Shadow(
+                                                                    color: accent
+                                                                        .withAlpha(
+                                                                            220,
+                                                                        ),
+                                                                    blurRadius:
+                                                                        22,
+                                                                ),
+                                                                Shadow(
+                                                                    color:
+                                                                        complement,
+                                                                    blurRadius:
+                                                                        8,
+                                                                ),
+                                                            ],
+                                                        ),
                                                     ),
-                                                    Shadow(
-                                                        color: _color,
-                                                        blurRadius: 6,
+                                                    const SizedBox(
+                                                        height: 6,
+                                                    ),
+                                                    Text(
+                                                        _liveTranscript
+                                                                .isNotEmpty
+                                                            ? _liveTranscript
+                                                            : 'LISTENING',
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                        maxLines: 2,
+                                                        overflow:
+                                                            TextOverflow
+                                                                .ellipsis,
+                                                        style: TextStyle(
+                                                            color:
+                                                                _liveTranscript
+                                                                        .isNotEmpty
+                                                                    ? accent
+                                                                    : Colors
+                                                                        .white38,
+                                                            fontSize: 11,
+                                                            fontStyle:
+                                                                _liveTranscript
+                                                                        .isNotEmpty
+                                                                    ? FontStyle
+                                                                        .normal
+                                                                    : FontStyle
+                                                                        .italic,
+                                                            letterSpacing: 1,
+                                                        ),
                                                     ),
                                                 ],
                                             ),
@@ -942,7 +1141,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 child: Text(
                                     '$_name CORE - ONLINE',
                                     style: TextStyle(
-                                        color: _color,
+                                        color: _accent,
                                         fontSize: 18,
                                         fontWeight: FontWeight.bold,
                                     ),
@@ -1035,7 +1234,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                         Text(
                             'TRANSLATION / RETRIEVAL',
                             style: TextStyle(
-                                color: _color,
+                                color: _accent,
                                 fontWeight: FontWeight.bold,
                             ),
                         ),
@@ -1267,6 +1466,26 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                         ),
                                                     ],
                                                 ),
+                                                if (_liveTranscript
+                                                    .isNotEmpty)
+                                                    Align(
+                                                        alignment: Alignment
+                                                            .centerLeft,
+                                                        child: Text(
+                                                            'hearing: '
+                                                            '$_liveTranscript',
+                                                            maxLines: 2,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                            style:
+                                                                const TextStyle(
+                                                                color: Colors
+                                                                    .cyanAccent,
+                                                                fontSize: 11,
+                                                            ),
+                                                        ),
+                                                    ),
                                                 Align(
                                                     alignment:
                                                         Alignment.centerLeft,
@@ -1458,7 +1677,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                         Text(
                             title,
                             style: TextStyle(
-                                color: _color,
+                                color: _accent,
                                 fontSize: 11,
                                 fontWeight: FontWeight.bold,
                             ),

@@ -27,13 +27,17 @@ class CognitiveSearch {
     }) : _gateway = gateway,
          _index = HnswVectorIndex(maxElements: maxNodes);
 
-    final RemoteAiGateway? _gateway;
+    RemoteAiGateway? _gateway;
     final int chunkSize;
     final int chunkOverlap;
     final int maxNodes;
     final int lexicalDimensions;
     final HnswVectorIndex _index;
     int _documentCounter = 0;
+
+    /// Repoints embedding lookups when the remote host is
+    /// (re)configured at runtime.
+    set gateway(RemoteAiGateway? value) => _gateway = value;
 
     Future<void> ingestText({
         required String source,

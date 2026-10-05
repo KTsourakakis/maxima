@@ -3,6 +3,7 @@ import 'dart:io' show Directory, Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'services/access_control.dart';
 import 'services/cognitive_search.dart';
@@ -51,8 +52,10 @@ class _InstallationGatewayState extends State<InstallationGateway>
         EventChannel('aura.straton.maxima/wake_word');
 
     final NativeBridge? _native = NativeBridge.tryCreate();
-    final RemoteAiGateway? _aiGateway = RemoteAiGateway.fromEnvironment();
-    final RemoteHostGateway? _remoteHost = RemoteHostGateway.fromEnvironment();
+    RemoteAiGateway? _aiGateway = RemoteAiGateway.fromEnvironment();
+    RemoteHostGateway? _remoteHost = RemoteHostGateway.fromEnvironment();
+    static const FlutterSecureStorage _settingsStore =
+        FlutterSecureStorage();
     final WakeOnLan _wakeOnLan = const WakeOnLan();
     final SipClient _sip = SipClient();
     late final DesktopMicBroker _micBroker = DesktopMicBroker();
@@ -72,6 +75,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
     final TextEditingController _translationInput = TextEditingController();
     final TextEditingController _commandInput = TextEditingController();
     final TextEditingController _wolMacInput = TextEditingController();
+    final TextEditingController _hostInput = TextEditingController();
 
     late final AnimationController _pulseController;
     late final Animation<double> _pulseAnimation;
@@ -105,6 +109,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                 curve: Curves.easeInOut,
             ),
         );
+        unawaited(_restoreHost());
         unawaited(_checkGateway());
         unawaited(_seedKnowledge());
         unawaited(_resolveSecureStorage());
@@ -152,12 +157,64 @@ class _InstallationGatewayState extends State<InstallationGateway>
         _translationInput.dispose();
         _commandInput.dispose();
         _wolMacInput.dispose();
+        _hostInput.dispose();
         _pulseController.dispose();
         _aiGateway?.close();
         _remoteHost?.close();
         unawaited(_desktopStt?.dispose());
         unawaited(_wakeController.dispose());
         super.dispose();
+    }
+
+    /// Restores the last successfully used LAN host IP so the app
+    /// reconnects automatically across restarts.
+    Future<void> _restoreHost() async {
+        try {
+            final saved = await _settingsStore.read(key: 'maxima_host_ip');
+            if (saved != null && saved.isNotEmpty && mounted) {
+                _hostInput.text = saved;
+                _connectHost();
+            }
+        } catch (_) {
+        }
+    }
+
+    /// Points the AI gateway + host tunnel at a LAN machine entered
+    /// in the REMOTE AI panel. Accepts `192.168.1.27`,
+    /// `192.168.1.27:11434` or a full `http://` URL.
+    void _connectHost() {
+        var host = _hostInput.text.trim();
+        if (host.isEmpty) return;
+        host = host.replaceAll(RegExp(r'^[a-zA-Z]+://'), '').split('/').first;
+        final hostOnly = host.split(':').first;
+
+        try {
+            _aiGateway?.close();
+            _aiGateway = RemoteAiGateway(
+                baseUri: Uri.parse(
+                    'http://${host.contains(':') ? host : '$host:11434'}',
+                ),
+            );
+            const token = String.fromEnvironment(
+                'REMOTE_HOST_TOKEN',
+                defaultValue: 'maxima-local',
+            );
+            _remoteHost?.close();
+            _remoteHost = RemoteHostGateway(
+                baseUri: Uri.parse('http://$hostOnly:8080'),
+                authToken: token,
+            );
+            _search.gateway = _aiGateway;
+            unawaited(
+                _settingsStore.write(key: 'maxima_host_ip', value: host),
+            );
+            setState(() {
+                _gatewayStatus = 'Checking remote AI gateway...';
+            });
+            unawaited(_checkGateway());
+        } catch (error) {
+            _showMessage('Invalid host "$host": $error');
+        }
     }
 
     Future<void> _checkGateway() async {
@@ -856,13 +913,41 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 tile(
                                     _panel(
                                         title: 'REMOTE AI',
-                                        child: Text(
-                                            '$_gatewayStatus\nHost tunnel: '
-                                            '${_remoteHost == null ? 'not configured' : 'configured'}',
-                                            style: const TextStyle(
-                                                color: Colors.white70,
-                                                fontSize: 11,
-                                            ),
+                                        child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.stretch,
+                                            children: [
+                                                Text(
+                                                    '$_gatewayStatus\nHost tunnel: '
+                                                    '${_remoteHost == null ? 'not configured' : 'configured'}',
+                                                    style: const TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 11,
+                                                    ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                TextField(
+                                                    controller: _hostInput,
+                                                    keyboardType:
+                                                        TextInputType.url,
+                                                    decoration:
+                                                        const InputDecoration(
+                                                        isDense: true,
+                                                        hintText:
+                                                            'Host IP e.g. 192.168.1.27',
+                                                    ),
+                                                    onSubmitted: (_) =>
+                                                        _connectHost(),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                FilledButton.tonal(
+                                                    onPressed: _connectHost,
+                                                    child: const Text(
+                                                        'Connect',
+                                                    ),
+                                                ),
+                                            ],
                                         ),
                                     ),
                                 ),

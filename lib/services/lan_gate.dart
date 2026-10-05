@@ -14,7 +14,9 @@ bool isPrivateLanHost(String host) {
     if (lower.isEmpty) return false;
     if (lower == 'localhost' || lower.endsWith('.localhost')) return true;
     if (lower.endsWith('.local') || lower.endsWith('.lan') ||
-        lower.endsWith('.internal')) {
+        lower.endsWith('.internal') || lower.endsWith('.ts.net')) {
+        // .ts.net = Tailscale MagicDNS: the transport is already
+        // WireGuard-encrypted, so plaintext HTTP inside the tunnel is safe.
         return true;
     }
 
@@ -33,6 +35,9 @@ bool isPrivateLanHost(String host) {
         if (a == 169 && b == 254) return true; // link-local
         if (a == 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
         if (a == 192 && b == 168) return true; // 192.168.0.0/16
+        // 100.64.0.0/10 is CGNAT — used by Tailscale/Headscale overlays
+        // whose packets are already encrypted end-to-end (WireGuard).
+        if (a == 100 && b >= 64 && b <= 127) return true;
         return false;
     }
 

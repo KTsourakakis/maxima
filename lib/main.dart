@@ -93,6 +93,31 @@ class _InstallationGatewayState extends State<InstallationGateway>
     bool _agentMode = false;
     bool _agentBusy = false;
     String _speechModelStatus = 'speech model: not checked';
+    String _speechLang = 'en';
+    String? _installedModelLang;
+
+    /// Small Vosk acoustic models (~40-50 MB), one per language. The
+    /// recognizer holds a single model at a time; switching language
+    /// downloads that model and restarts the engine.
+    static const Map<String, String> _speechModels = {
+        'en': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-en-us-0.15.zip',
+        'el': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-el-gr-0.7.zip',
+        'es': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-es-0.42.zip',
+        'fr': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-fr-0.22.zip',
+        'de': 'https://alphacephei.com/vosk/models/'
+            'vosk-model-small-de-0.15.zip',
+    };
+    static const Map<String, String> _speechLangNames = {
+        'en': 'English',
+        'el': 'Greek',
+        'es': 'Spanish',
+        'fr': 'French',
+        'de': 'German',
+    };
     double _batteryThreshold = 15;
     String _name = 'MAXIMA';
     String _targetLanguage = 'Greek';
@@ -176,6 +201,14 @@ class _InstallationGatewayState extends State<InstallationGateway>
     Future<void> _restoreHost() async {
         try {
             final saved = await _settingsStore.read(key: 'maxima_host_ip');
+            final savedLang =
+                await _settingsStore.read(key: 'maxima_speech_lang');
+            _installedModelLang = await _settingsStore.read(
+                key: 'maxima_speech_lang_installed',
+            );
+            if (savedLang != null && _speechModels.containsKey(savedLang)) {
+                _speechLang = savedLang;
+            }
             if (saved != null && saved.isNotEmpty && mounted) {
                 _hostInput.text = saved;
                 _connectHost();
@@ -298,7 +331,10 @@ class _InstallationGatewayState extends State<InstallationGateway>
         try {
             final status =
                 await _platform.invokeMethod<String>('voskModelStatus');
-            if (status != null && status.startsWith('ready')) {
+            final ready = status != null &&
+                status.startsWith('ready') &&
+                _installedModelLang == _speechLang;
+            if (ready) {
                 if (mounted) {
                     setState(() => _speechModelStatus = 'speech model: ready');
                 }
@@ -307,15 +343,33 @@ class _InstallationGatewayState extends State<InstallationGateway>
             }
             if (mounted) {
                 setState(() => _speechModelStatus =
-                    'speech model: downloading...');
+                    'speech model: downloading '
+                    '${_speechLangNames[_speechLang]}...');
                 _showMessage(
-                    'Downloading speech model (first run, ~50 MB)...',
+                    'Downloading speech model '
+                    '(${_speechLangNames[_speechLang]}, ~50 MB)...',
                 );
             }
-            await _platform.invokeMethod<String>('downloadVoskModel');
+            await _platform.invokeMethod<String>(
+                'downloadVoskModel',
+                {'url': _speechModels[_speechLang]},
+            );
+            _installedModelLang = _speechLang;
+            unawaited(
+                _settingsStore.write(
+                    key: 'maxima_speech_lang_installed',
+                    value: _speechLang,
+                ),
+            );
             if (mounted) {
                 setState(() => _speechModelStatus = 'speech model: ready');
                 _showMessage('Speech model ready.');
+            }
+            // Stop any engine running with the previous model so the
+            // recognizer reloads the new language.
+            try {
+                await _platform.invokeMethod<bool>('stopWakeWordEngine');
+            } catch (_) {
             }
         } catch (error) {
             if (mounted) {
@@ -326,6 +380,19 @@ class _InstallationGatewayState extends State<InstallationGateway>
             return;
         }
         unawaited(_startWakeWordEngine());
+    }
+
+    void _selectSpeechLang(String? lang) {
+        if (lang == null || lang == _speechLang) return;
+        setState(() {
+            _speechLang = lang;
+            _speechModelStatus =
+                'speech model: switching to ${_speechLangNames[lang]}...';
+        });
+        unawaited(
+            _settingsStore.write(key: 'maxima_speech_lang', value: lang),
+        );
+        unawaited(_ensureSpeechModelThenStart());
     }
 
     /// Engine status events forwarded by [WakeWordController]:
@@ -350,9 +417,9 @@ class _InstallationGatewayState extends State<InstallationGateway>
 
         final lower = transcript.toLowerCase();
         // Vosk's small model may split the wake name ("maxi ma",
-        // "max ima"), so match it as loosely-separated syllables.
+        // "max ima"); the Greek model transcribes it as "μάξιμα".
         final wakeMatch =
-            RegExp(r'max\s*i\s*ma').firstMatch(lower);
+            RegExp(r'max\s*i\s*ma|μάξιμα|μαξιμα').firstMatch(lower);
         String? query;
         if (wakeMatch != null) {
             final after =
@@ -378,11 +445,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
             final answer = await gateway.generate(
                 query,
                 system: 'You are Maxima, a concise voice assistant. '
-                    'Answer briefly in plain spoken sentences.',
+                    'Answer briefly in plain spoken sentences, in the '
+                    'same language the user spoke.',
             );
             if (!mounted || answer.isEmpty) return;
             setState(() => _translationOutput = 'You: $transcript\n\n$answer');
-            await _speak(answer);
+            await _speak(answer, lang: _speechLang);
         } catch (error) {
             _showMessage('Agent query failed: $error');
         } finally {
@@ -390,12 +458,12 @@ class _InstallationGatewayState extends State<InstallationGateway>
         }
     }
 
-    Future<void> _speak(String text) async {
+    Future<void> _speak(String text, {String? lang}) async {
         if (!_hasPlatformChannel) return;
         try {
             await _platform.invokeMethod<void>(
                 'speakText',
-                {'text': text},
+                {'text': text, if (lang != null) 'lang': lang},
             );
         } catch (_) {
         }
@@ -504,12 +572,10 @@ class _InstallationGatewayState extends State<InstallationGateway>
             );
             if (!mounted) return;
             setState(() => _translationOutput = translated);
-            if (_hasPlatformChannel) {
-                await _platform.invokeMethod<void>(
-                    'speakText',
-                    {'text': translated},
-                );
-            }
+            await _speak(
+                translated,
+                lang: _targetLanguage == 'Greek' ? 'el' : 'en',
+            );
         } catch (error) {
             if (!mounted) return;
             _showMessage('Translation failed: $error');
@@ -1052,6 +1118,49 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                                 setState(() =>
                                                                     _agentMode =
                                                                         v),
+                                                        ),
+                                                    ],
+                                                ),
+                                                Row(
+                                                    children: [
+                                                        const Expanded(
+                                                            child: Text(
+                                                                'Speech language',
+                                                                style:
+                                                                    TextStyle(
+                                                                    fontSize:
+                                                                        12,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        DropdownButton<String>(
+                                                            value:
+                                                                _speechLang,
+                                                            isDense: true,
+                                                            underline:
+                                                                const SizedBox
+                                                                    .shrink(),
+                                                            items:
+                                                                _speechLangNames
+                                                                    .entries
+                                                                    .map(
+                                                                (e) =>
+                                                                    DropdownMenuItem(
+                                                                    value:
+                                                                        e.key,
+                                                                    child: Text(
+                                                                        e.value,
+                                                                        style:
+                                                                            const TextStyle(
+                                                                            fontSize:
+                                                                                12,
+                                                                        ),
+                                                                    ),
+                                                                ),
+                                                            )
+                                                                    .toList(),
+                                                            onChanged:
+                                                                _selectSpeechLang,
                                                         ),
                                                     ],
                                                 ),

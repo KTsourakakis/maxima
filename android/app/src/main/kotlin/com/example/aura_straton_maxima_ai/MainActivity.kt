@@ -129,6 +129,12 @@ class MainActivity : FlutterActivity(), TextToSpeech.OnInitListener {
                             null
                         )
                         else -> {
+                            val lang = call.argument<String>("lang")
+                            if (!lang.isNullOrBlank()) {
+                                textToSpeech?.setLanguage(
+                                    Locale.forLanguageTag(lang)
+                                )
+                            }
                             textToSpeech?.speak(
                                 text,
                                 TextToSpeech.QUEUE_FLUSH,

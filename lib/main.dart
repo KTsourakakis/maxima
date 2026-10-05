@@ -349,15 +349,19 @@ class _InstallationGatewayState extends State<InstallationGateway>
         if (_agentBusy) return;
 
         final lower = transcript.toLowerCase();
+        // Vosk's small model may split the wake name ("maxi ma",
+        // "max ima"), so match it as loosely-separated syllables.
+        final wakeMatch =
+            RegExp(r'max\s*i\s*ma').firstMatch(lower);
         String? query;
-        if (lower.contains('maxima')) {
-            final after = lower.split('maxima').last.trim();
+        if (wakeMatch != null) {
+            final after =
+                transcript.substring(wakeMatch.end).trim();
             if (after.length < 3) {
                 await _speak('I am listening.');
                 return;
             }
-            final idx = transcript.toLowerCase().lastIndexOf('maxima');
-            query = transcript.substring(idx + 'maxima'.length).trim();
+            query = after;
         } else if (_agentMode) {
             query = transcript.trim();
         }
@@ -684,7 +688,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                     width: double.infinity,
                     height: double.infinity,
                     color: _color.withAlpha(
-                        (12 * _pulseAnimation.value).round(),
+                        (25 + 55 * _pulseAnimation.value).round(),
                     ),
                     child: Center(
                         child: AnimatedContainer(
@@ -702,8 +706,22 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                     : BoxShape.circle,
                                 border: Border.all(
                                     color: _color,
-                                    width: 3 * _pulseAnimation.value,
+                                    width: 1.5 + 3 * _pulseAnimation.value,
                                 ),
+                                boxShadow: [
+                                    BoxShadow(
+                                        color: _color.withAlpha(
+                                            (30 +
+                                                    190 *
+                                                        _pulseAnimation.value)
+                                                .round(),
+                                        ),
+                                        blurRadius:
+                                            25 + 55 * _pulseAnimation.value,
+                                        spreadRadius:
+                                            2 + 10 * _pulseAnimation.value,
+                                    ),
+                                ],
                                 borderRadius: _expanded
                                     ? BorderRadius.circular(16)
                                     : null,
@@ -722,6 +740,17 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                 fontSize: 22,
                                                 fontWeight: FontWeight.bold,
                                                 letterSpacing: 2,
+                                                shadows: [
+                                                    Shadow(
+                                                        color: _color
+                                                            .withAlpha(200),
+                                                        blurRadius: 18,
+                                                    ),
+                                                    Shadow(
+                                                        color: _color,
+                                                        blurRadius: 6,
+                                                    ),
+                                                ],
                                             ),
                                         ),
                                     ),

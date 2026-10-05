@@ -626,19 +626,24 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                 if (constraints.maxWidth >= 760) {
                                     return Row(
                                         crossAxisAlignment:
-                                            CrossAxisAlignment.stretch,
+                                            CrossAxisAlignment.start,
                                         children: [
                                             Expanded(child: left),
                                             const SizedBox(width: 10),
-                                            Expanded(child: right),
+                                            Expanded(
+                                                child:
+                                                    SingleChildScrollView(
+                                                    child: right,
+                                                ),
+                                            ),
                                         ],
                                     );
                                 }
                                 return ListView(
                                     children: [
-                                        SizedBox(height: 360, child: left),
+                                        SizedBox(height: 460, child: left),
                                         const SizedBox(height: 10),
-                                        SizedBox(height: 560, child: right),
+                                        right,
                                     ],
                                 );
                             },
@@ -679,11 +684,16 @@ class _InstallationGatewayState extends State<InstallationGateway>
                             ),
                         ),
                         const SizedBox(height: 8),
-                        Row(
+                        Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                                Expanded(
+                                SizedBox(
+                                    width: 160,
                                     child: DropdownButtonFormField<String>(
                                         initialValue: _targetLanguage,
+                                        isExpanded: true,
                                         decoration: const InputDecoration(
                                             labelText: 'Target language',
                                         ),
@@ -705,13 +715,11 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                         },
                                     ),
                                 ),
-                                const SizedBox(width: 8),
                                 FilledButton(
                                     onPressed:
                                         _translating ? null : _translate,
                                     child: const Text('Translate'),
                                 ),
-                                const SizedBox(width: 8),
                                 OutlinedButton(
                                     onPressed: _retrieve,
                                     child: const Text('Retrieve'),
@@ -744,137 +752,179 @@ class _InstallationGatewayState extends State<InstallationGateway>
     }
 
     Widget _operationsPane() {
-        return Column(
-            children: [
-                SizedBox(
-                    height: 170,
-                    child: _panel(
-                        title: 'HARDWARE TIMING',
-                        child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                            Text(
-                                _timingOutput,
-                                style: const TextStyle(color: Colors.white70),
-                            ),
-                            const SizedBox(height: 8),
-                            Wrap(
-                                spacing: 8,
+        return LayoutBuilder(
+            builder: (context, constraints) {
+                final twoCols = constraints.maxWidth >= 520;
+                final tileWidth = twoCols
+                    ? (constraints.maxWidth - 10) / 2
+                    : constraints.maxWidth;
+                Widget tile(Widget child) =>
+                    SizedBox(width: tileWidth, child: child);
+                return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                        _panel(
+                            title: 'HARDWARE TIMING',
+                            child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                    FilledButton.tonal(
-                                        onPressed: _measureTiming,
-                                        child: const Text('Measure purge'),
-                                    ),
-                                    FilledButton(
-                                        style: FilledButton.styleFrom(
-                                            backgroundColor: Colors.red,
+                                    Text(
+                                        _timingOutput,
+                                        style: const TextStyle(
+                                            color: Colors.white70,
                                         ),
-                                        onPressed: _executePurge,
-                                        child: const Text('FORCE_BLACK'),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        children: [
+                                            FilledButton.tonal(
+                                                onPressed: _measureTiming,
+                                                child: const Text(
+                                                    'Measure purge',
+                                                ),
+                                            ),
+                                            FilledButton(
+                                                style: FilledButton.styleFrom(
+                                                    backgroundColor:
+                                                        Colors.red,
+                                                ),
+                                                onPressed: _executePurge,
+                                                child: const Text(
+                                                    'FORCE_BLACK',
+                                                ),
+                                            ),
+                                        ],
                                     ),
                                 ],
                             ),
-                        ],
-                    ),
-                ),
-                ),
-                const SizedBox(height: 10),
-                Expanded(
-                    child: GridView.count(
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 10,
-                        crossAxisSpacing: 10,
-                        childAspectRatio: 1.55,
-                        children: [
-                            _panel(
-                                title: 'MICROPHONE',
-                                child: SwitchListTile(
-                                    dense: true,
-                                    contentPadding: EdgeInsets.zero,
-                                    title: const Text(
-                                        'Compliant mute',
-                                        style: TextStyle(fontSize: 12),
+                        ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            children: [
+                                tile(
+                                    _panel(
+                                        title: 'MICROPHONE',
+                                        child: Row(
+                                            children: [
+                                                const Expanded(
+                                                    child: Text(
+                                                        'Compliant mute',
+                                                        style: TextStyle(
+                                                            fontSize: 12,
+                                                        ),
+                                                    ),
+                                                ),
+                                                Switch(
+                                                    value: _microphoneMuted,
+                                                    onChanged:
+                                                        _setMicrophoneMuted,
+                                                ),
+                                            ],
+                                        ),
                                     ),
-                                    value: _microphoneMuted,
-                                    onChanged: _setMicrophoneMuted,
                                 ),
-                            ),
-                            _panel(
-                                title: 'BATTERY GATEWAY',
-                                child: Column(
-                                    children: [
-                                        Text(
-                                            '${_batteryThreshold.round()}%',
+                                tile(
+                                    _panel(
+                                        title: 'BATTERY GATEWAY',
+                                        child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                                Text(
+                                                    '${_batteryThreshold.round()}%',
+                                                    style: const TextStyle(
+                                                        color: Colors.white70,
+                                                    ),
+                                                ),
+                                                Slider(
+                                                    value: _batteryThreshold,
+                                                    min: 5,
+                                                    max: 95,
+                                                    divisions: 18,
+                                                    onChanged:
+                                                        _setBatteryThreshold,
+                                                ),
+                                            ],
+                                        ),
+                                    ),
+                                ),
+                                tile(
+                                    _panel(
+                                        title: 'REMOTE AI',
+                                        child: Text(
+                                            '$_gatewayStatus\nHost tunnel: '
+                                            '${_remoteHost == null ? 'not configured' : 'configured'}',
                                             style: const TextStyle(
                                                 color: Colors.white70,
+                                                fontSize: 11,
                                             ),
                                         ),
-                                        Slider(
-                                            value: _batteryThreshold,
-                                            min: 5,
-                                            max: 95,
-                                            divisions: 18,
-                                            onChanged: _setBatteryThreshold,
-                                        ),
-                                    ],
-                                ),
-                            ),
-                            _panel(
-                                title: 'REMOTE AI',
-                                child: Text(
-                                    '$_gatewayStatus\nHost tunnel: '
-                                    '${_remoteHost == null ? 'not configured' : 'configured'}',
-                                    style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 11,
                                     ),
                                 ),
-                            ),
-                            _panel(
-                                title: 'VOIP / TELECOM',
-                                child: Text(
-                                    !_accessControl.allows(
-                                            SecureCapability.voipPipeline)
-                                        ? 'Premium capability locked'
-                                        : (_native?.voipPipelineReady == true
-                                            ? 'PJSIP native link active'
-                                            : 'ConnectionService registered'),
-                                    style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 11,
-                                    ),
-                                ),
-                            ),
-                            _panel(
-                                title: 'TTS ANALYTICS',
-                                child: FilledButton.tonal(
-                                    onPressed: _speakStatus,
-                                    child: const Text('Speak status'),
-                                ),
-                            ),
-                            _panel(
-                                title: 'WAKE-ON-LAN',
-                                child: Column(
-                                    children: [
-                                        TextField(
-                                            controller: _wolMacInput,
-                                            decoration: const InputDecoration(
-                                                isDense: true,
-                                                hintText: 'AA:BB:CC:DD:EE:FF',
+                                tile(
+                                    _panel(
+                                        title: 'VOIP / TELECOM',
+                                        child: Text(
+                                            !_accessControl.allows(
+                                                    SecureCapability
+                                                        .voipPipeline)
+                                                ? 'Premium capability locked'
+                                                : (_native?.voipPipelineReady ==
+                                                        true
+                                                    ? 'PJSIP native link active'
+                                                    : 'ConnectionService registered'),
+                                            style: const TextStyle(
+                                                color: Colors.white70,
+                                                fontSize: 11,
                                             ),
                                         ),
-                                        const SizedBox(height: 4),
-                                        FilledButton.tonal(
-                                            onPressed: _sendWakeOnLan,
-                                            child: const Text('Send'),
-                                        ),
-                                    ],
+                                    ),
                                 ),
-                            ),
-                        ],
-                    ),
-                ),
-            ],
+                                tile(
+                                    _panel(
+                                        title: 'TTS ANALYTICS',
+                                        child: FilledButton.tonal(
+                                            onPressed: _speakStatus,
+                                            child: const Text('Speak status'),
+                                        ),
+                                    ),
+                                ),
+                                tile(
+                                    _panel(
+                                        title: 'WAKE-ON-LAN',
+                                        child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.stretch,
+                                            children: [
+                                                TextField(
+                                                    controller: _wolMacInput,
+                                                    decoration:
+                                                        const InputDecoration(
+                                                        isDense: true,
+                                                        hintText:
+                                                            'AA:BB:CC:DD:EE:FF',
+                                                    ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                FilledButton.tonal(
+                                                    onPressed: _sendWakeOnLan,
+                                                    child: const Text('Send'),
+                                                ),
+                                            ],
+                                        ),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ],
+                );
+            },
         );
     }
 
@@ -884,6 +934,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
             child: Padding(
                 padding: const EdgeInsets.all(10),
                 child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                         Text(
@@ -895,7 +946,7 @@ class _InstallationGatewayState extends State<InstallationGateway>
                             ),
                         ),
                         const SizedBox(height: 8),
-                        Expanded(child: child),
+                        child,
                     ],
                 ),
             ),

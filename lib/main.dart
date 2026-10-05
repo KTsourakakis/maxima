@@ -1,13 +1,21 @@
 import 'dart:async';
-import 'dart:io' show Directory, Platform;
+import 'dart:io'
+    show
+        Directory,
+        InternetAddressType,
+        NetworkInterface,
+        Platform,
+        Socket;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'services/access_control.dart';
 import 'services/cognitive_search.dart';
 import 'services/desktop_stt.dart';
+import 'services/lan_gate.dart';
 import 'services/mic_broker.dart';
 import 'services/native_bridge.dart';
 import 'services/remote_ai_gateway.dart';
@@ -214,6 +222,101 @@ class _InstallationGatewayState extends State<InstallationGateway>
                 _connectHost();
             }
         } catch (_) {
+        }
+        // Nothing configured by build or restore: probe the local
+        // Wi-Fi so the laptop is found with zero typing.
+        if (_aiGateway == null) {
+            unawaited(_autoDiscoverHost());
+        }
+    }
+
+    /// Scans the phone's /24 Wi-Fi subnet for a live Ollama port
+    /// (11434). First responsive host wins, then the normal connect
+    /// path configures the gateway and host tunnel automatically.
+    Future<void> _autoDiscoverHost() async {
+        if (_aiGateway != null) return;
+        if (mounted) {
+            setState(() => _gatewayStatus =
+                'Searching for a host on this network...');
+        }
+        try {
+            final interfaces = await NetworkInterface.list(
+                type: InternetAddressType.IPv4,
+            );
+            for (final iface in interfaces) {
+                for (final addr in iface.addresses) {
+                    final ip = addr.address;
+                    if (!isPrivateLanHost(ip) || ip.startsWith('127.')) {
+                        continue;
+                    }
+                    final found = await _scanSubnet(ip);
+                    if (found != null && mounted) {
+                        _hostInput.text = found;
+                        _connectHost();
+                        return;
+                    }
+                }
+            }
+        } catch (_) {
+        }
+        if (mounted && _aiGateway == null) {
+            setState(() => _gatewayStatus =
+                'No host found on this network. Enter the IP manually.');
+        }
+    }
+
+    Future<String?> _scanSubnet(String localIp) async {
+        final prefix = localIp.substring(0, localIp.lastIndexOf('.'));
+        const batch = 64;
+        for (var start = 1; start < 255; start += batch) {
+            final probes = <Future<String?>>[];
+            for (var i = start; i < start + batch && i < 255; i++) {
+                final host = '$prefix.$i';
+                if (host == localIp) continue;
+                probes.add(_probeOllama(host));
+            }
+            for (final result in await Future.wait(probes)) {
+                if (result != null) return result;
+            }
+            if (!mounted) return null;
+        }
+        return null;
+    }
+
+    Future<String?> _probeOllama(String host) async {
+        try {
+            final socket = await Socket.connect(
+                host,
+                11434,
+                timeout: const Duration(milliseconds: 700),
+            );
+            socket.destroy();
+            return host;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    /// Tailscale cannot be bundled or installed silently (Play Store +
+    /// VPN consent are mandatory) — this opens its store listing so the
+    /// user is two taps away from any-network access.
+    Future<void> _openTailscaleStore() async {
+        const id = 'com.tailscale.ipn';
+        final web = Uri.parse(
+            'https://play.google.com/store/apps/details?id=$id',
+        );
+        try {
+            final market = Uri.parse('market://details?id=$id');
+            if (await canLaunchUrl(market)) {
+                await launchUrl(market);
+                return;
+            }
+            await launchUrl(web, mode: LaunchMode.externalApplication);
+        } catch (_) {
+            try {
+                await launchUrl(web, mode: LaunchMode.externalApplication);
+            } catch (_) {
+            }
         }
     }
 
@@ -1240,6 +1343,42 @@ class _InstallationGatewayState extends State<InstallationGateway>
                                                     child: const Text(
                                                         'Connect',
                                                     ),
+                                                ),
+                                                Row(
+                                                    children: [
+                                                        Expanded(
+                                                            child:
+                                                                TextButton(
+                                                                onPressed:
+                                                                    _autoDiscoverHost,
+                                                                child:
+                                                                    const Text(
+                                                                    'Find on Wi-Fi',
+                                                                    style:
+                                                                        TextStyle(
+                                                                        fontSize:
+                                                                            10,
+                                                                    ),
+                                                                ),
+                                                            ),
+                                                        ),
+                                                        Expanded(
+                                                            child:
+                                                                TextButton(
+                                                                onPressed:
+                                                                    _openTailscaleStore,
+                                                                child:
+                                                                    const Text(
+                                                                    'Anywhere via Tailscale',
+                                                                    style:
+                                                                        TextStyle(
+                                                                        fontSize:
+                                                                            10,
+                                                                        ),
+                                                                    ),
+                                                            ),
+                                                        ),
+                                                    ],
                                                 ),
                                             ],
                                         ),
